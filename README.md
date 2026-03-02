@@ -1,11 +1,11 @@
-# @mykin-ai/expo-audio-stream
+# @edkimmel/expo-audio-stream
 
 Native audio recording and low-latency playback for Expo/React Native. Designed for real-time voice AI applications: microphone capture, chunked PCM playback, and a jitter-buffered native pipeline for streaming audio from AI backends.
 
 ## Install
 
 ```bash
-npx expo install @mykin-ai/expo-audio-stream
+npx expo install @edkimmel/expo-audio-stream
 ```
 
 ## Quick Start
@@ -13,7 +13,7 @@ npx expo install @mykin-ai/expo-audio-stream
 ### Microphone Recording
 
 ```typescript
-import { ExpoPlayAudioStream } from "@mykin-ai/expo-audio-stream";
+import { ExpoPlayAudioStream } from "@edkimmel/expo-audio-stream";
 
 const { recordingResult, subscription } =
   await ExpoPlayAudioStream.startMicrophone({
@@ -41,7 +41,7 @@ For playing base64-encoded PCM audio in a queue with turn management:
 import {
   ExpoPlayAudioStream,
   EncodingTypes,
-} from "@mykin-ai/expo-audio-stream";
+} from "@edkimmel/expo-audio-stream";
 
 await ExpoPlayAudioStream.setSoundConfig({
   sampleRate: 24000,
@@ -66,7 +66,7 @@ const sub = ExpoPlayAudioStream.subscribeToSoundChunkPlayed(async (e) => {
 The `Pipeline` class provides jitter-buffered, low-latency playback with a native write thread. Use this for streaming audio from AI backends over WebSockets.
 
 ```typescript
-import { Pipeline } from "@mykin-ai/expo-audio-stream";
+import { Pipeline } from "@edkimmel/expo-audio-stream";
 
 // Connect with desired config
 const result = await Pipeline.connect({
@@ -265,7 +265,7 @@ import {
   PlaybackModes,           // { REGULAR, VOICE_PROCESSING, CONVERSATION }
   AudioEvents,             // { AudioData, SoundChunkPlayed, SoundStarted, DeviceReconnected }
   SuspendSoundEventTurnId, // "suspend-sound-events" -- suppresses playback events
-} from "@mykin-ai/expo-audio-stream";
+} from "@edkimmel/expo-audio-stream";
 ```
 
 ## Platform Notes
