@@ -523,11 +523,17 @@ public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, Micr
         // Emit the event to JavaScript
         sendEvent(audioDataEvent, eventBody)
     }
-    
+
+    func audioStreamManager(_ manager: AudioSessionManager, didEncounterError error: String, errorMessage: String) {
+        let eventBody: [String: Any] = [
+            "error": error,
+            "errorMessage": errorMessage,
+            "streamUuid": manager.recordingUUID?.uuidString ?? ""
+        ]
+        sendEvent(audioDataEvent, eventBody)
+    }
+
     /// Checks microphone permission and calls the completion handler with the result.
-    ///
-    /// - Parameters:
-    ///   - completion: A completion handler that receives a boolean indicating whether the microphone permission was granted.
     private func checkMicrophonePermission(completion: @escaping (Bool) -> Void) {
         switch AVAudioSession.sharedInstance().recordPermission {
         case .granted:
@@ -569,7 +575,16 @@ public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, Micr
         // Emit the event to JavaScript
         sendEvent(audioDataEvent, eventBody)
     }
-    
+
+    func onMicrophoneError(_ error: String, _ errorMessage: String) {
+        let eventBody: [String: Any] = [
+            "error": error,
+            "errorMessage": errorMessage,
+            "streamUuid": ""
+        ]
+        sendEvent(audioDataEvent, eventBody)
+    }
+
     func onDeviceReconnected(_ reason: AVAudioSession.RouteChangeReason) {
         let reasonString: String
         switch reason {

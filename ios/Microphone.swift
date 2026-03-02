@@ -129,11 +129,14 @@ class Microphone {
         let tapBufferSize = max(intervalSamples, 256) // floor at 256 frames
 
         audioEngine.inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: audioFormat) { [weak self] (buffer, time) in
-            guard let self = self else {
-                Logger.debug("Error: File URL or self is nil during buffer processing.")
+            guard let self = self else { return }
+
+            guard buffer.frameLength > 0 else {
+                Logger.debug("Error: received empty buffer in tap callback")
+                self.delegate?.onMicrophoneError("READ_ERROR", "Received empty audio buffer")
                 return
             }
-            
+
             self.processAudioBuffer(buffer)
             self.lastBufferTime = time
         }
