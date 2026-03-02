@@ -238,35 +238,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
         }
     }
 
-    fun mutePlayback(promise: Promise) {
-        Log.d("ExpoPlayStreamModule", "Mute Playback")
-        isMuted = true
-        promise.resolve(null)
-    }
-
-    fun pausePlayback(promise: Promise? = null, isFlushAudioTrack: Boolean = false) {
-        try {
-            if (::audioTrack.isInitialized && audioTrack.state != AudioTrack.STATE_UNINITIALIZED) {
-                audioTrack.pause()
-                if (isFlushAudioTrack) {
-                    try {
-                        audioTrack.flush()
-                    } catch (e: Exception) {
-                        Log.e("ExpoPlayStreamModule", "Error flushing AudioTrack: ${e.message}", e)
-                        // Don't rethrow - continue with playback state changes
-                    }
-                }
-            } else {
-                Log.d("ExpoPlayStreamModule", "AudioTrack not initialized or in invalid state, skipping pause/flush")
-            }
-            isPlaying = false
-            currentPlaybackJob?.cancel()
-            promise?.resolve(null)
-        } catch (e: Exception) {
-            promise?.reject("ERR_PAUSE_PLAYBACK", e.message, e)
-        }
-    }
-
     fun startPlayback(promise: Promise? = null) {
         try {
             if (!isPlaying) {

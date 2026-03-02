@@ -29,7 +29,6 @@ class AudioRecorderManager(
     private var recordingStartTime: Long = 0
     private var totalRecordedTime: Long = 0
     private var totalDataSize = 0
-    private var lastPauseTime = 0L
     private var pausedDuration = 0L
     private var lastEmittedSize = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -284,52 +283,6 @@ class AudioRecorderManager(
                 promise.reject("STOP_FAILED", "Failed to stop recording", e)
             }
         }
-    }
-
-    fun pauseRecording(promise: Promise) {
-        if (isRecording.get() && !isPaused.get()) {
-            // Release audio effects when pausing using the manager
-            audioEffectsManager.releaseAudioEffects()
-
-            audioRecord?.stop()
-            lastPauseTime =
-                System.currentTimeMillis()  // Record the time when the recording was paused
-            isPaused.set(true)
-            promise.resolve("Recording paused")
-        } else {
-            promise.reject(
-                "NOT_RECORDING_OR_ALREADY_PAUSED",
-                "Recording is either not active or already paused",
-                null
-            )
-        }
-    }
-
-    fun resumeRecording(promise: Promise) {
-        if (isRecording.get() && !isPaused.get()) {
-            promise.reject("NOT_PAUSED", "Recording is not paused", null)
-            return
-        } else if (audioRecord == null) {
-            promise.reject("NOT_RECORDING", "Recording is not active", null)
-        }
-
-        // Calculate the duration the recording was paused
-        pausedDuration += System.currentTimeMillis() - lastPauseTime
-        isPaused.set(false)
-        audioRecord?.startRecording()
-
-        // Re-apply audio effects when resuming using the manager
-        audioRecord?.let { audioEffectsManager.setupAudioEffects(it) }
-
-        promise.resolve("Recording resumed")
-    }
-
-    fun listAudioFiles(promise: Promise) {
-        promise.resolve(listOf<String>())
-    }
-
-    fun clearAudioStorage(promise: Promise) {
-        promise.resolve(null)
     }
 
     private fun recordingProcess() {

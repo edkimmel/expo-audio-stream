@@ -6,8 +6,6 @@ class SoundPlayer {
     private var audioEngine: AVAudioEngine!
     private var audioPlayerNode: AVAudioPlayerNode!
     
-    private var audioPlayer: AVAudioPlayer?
-    
     private let bufferAccessQueue = DispatchQueue(label: "com.expoaudiostream.bufferAccessQueue")
     
     private var audioQueue: [(buffer: AVAudioPCMBuffer, promise: RCTPromiseResolveBlock, turnId: String)] = []  // Queue for audio segments
@@ -327,24 +325,6 @@ class SoundPlayer {
     /// Resumes audio playback after interruption
     func resume() {
         self.isInterrupted = false
-    }
-    
-    /// Plays a WAV audio file from base64 encoded data
-    /// - Parameter base64String: Base64 encoded WAV audio data
-    /// - Note: This method plays the audio directly without queueing, using AVAudioPlayer
-    /// - Important: The base64 string must represent valid WAV format audio data
-    public func playWav(base64Wav base64String: String) {
-        guard let data = Data(base64Encoded: base64String) else {
-            Logger.debug("[SoundPlayer] Invalid Base64 String [ \(base64String)]")
-            return
-        }
-        do {
-            self.audioPlayer = try AVAudioPlayer(data: data, fileTypeHint: AVFileType.wav.rawValue)
-            self.audioPlayer!.volume = 1.0
-            audioPlayer!.play()
-        } catch {
-            Logger.debug("[SoundPlayer] Error playing WAV audio [ \(error)]")
-        }
     }
     
     /// Processes audio chunk based on common format

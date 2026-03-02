@@ -1,18 +1,5 @@
 // RecordingResult.swift
 
-struct RecordingResult {
-    var fileUri: String
-    var filename: String?
-    var mimeType: String?
-    var duration: Int64?
-    var size: Int64?
-    var channels: Int?
-    var bitDepth: Int?
-    var sampleRate: Double?
-    var error: String?
-    
-}
-
 struct StartRecordingResult {
     var fileUri: String?
     var mimeType: String?

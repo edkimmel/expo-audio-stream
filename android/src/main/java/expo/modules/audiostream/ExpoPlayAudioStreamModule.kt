@@ -19,13 +19,12 @@ import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.audiostream.pipeline.PipelineIntegration
-import kotlin.math.log
+
 
 
 class ExpoPlayAudioStreamModule : Module(), EventSender {
     private lateinit var audioRecorderManager: AudioRecorderManager
     private lateinit var audioPlaybackManager: AudioPlaybackManager
-    private lateinit var wavAudioPlayer: WavAudioPlayer
     private lateinit var audioManager: AudioManager
     private lateinit var pipelineIntegration: PipelineIntegration
 
@@ -103,7 +102,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         // Initialize managers for playback and for recording
         initializeManager()
         initializePlaybackManager()
-        initializeWavPlayer()
         initializePipeline()
 
         OnCreate {
@@ -118,7 +116,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             // Just clean up resources without reinitialization
             pipelineIntegration.destroy()
             audioPlaybackManager.runOnDispose()
-            wavAudioPlayer.release()
             audioRecorderManager.release()
         }
 
@@ -126,30 +123,12 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             // User explicitly called destroy - clean up and reinitialize for reuse
             pipelineIntegration.destroy()
             audioPlaybackManager.runOnDispose()
-            wavAudioPlayer.release()
             audioRecorderManager.release()
 
             // Reinitialize all managers so the module can be used again
             initializeManager()
             initializePlaybackManager()
-            initializeWavPlayer()
             initializePipeline()
-        }
-
-        AsyncFunction("startRecording") { options: Map<String, Any?>, promise: Promise ->
-            audioRecorderManager.startRecording(options, promise)
-        }
-
-        AsyncFunction("pauseRecording") { promise: Promise ->
-            audioRecorderManager.pauseRecording(promise)
-        }
-
-        AsyncFunction("resumeRecording") { promise: Promise ->
-            audioRecorderManager.resumeRecording(promise)
-        }
-
-        AsyncFunction("stopRecording") { promise: Promise ->
-            audioRecorderManager.stopRecording(promise)
         }
 
         AsyncFunction("requestPermissionsAsync") { promise: Promise ->
@@ -168,37 +147,8 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             )
         }
 
-        AsyncFunction("playAudio") { chunk: String, turnId: String, encoding: String?, promise: Promise ->
-            val pcmEncoding = when (encoding) {
-                "pcm_f32le" -> PCMEncoding.PCM_F32LE
-                "pcm_s16le", null -> PCMEncoding.PCM_S16LE
-                else -> {
-                    Log.d(Constants.TAG, "Unsupported encoding: $encoding, defaulting to PCM_S16LE")
-                    PCMEncoding.PCM_S16LE
-                }
-            }
-            audioPlaybackManager.playAudio(chunk, turnId, promise, pcmEncoding)
-        }
-
-        AsyncFunction("clearPlaybackQueueByTurnId") { turnId: String, promise: Promise ->
-            audioPlaybackManager.setCurrentTurnId(turnId)
-            promise.resolve(null)
-        }
-
         AsyncFunction("setVolume") { volume: Double, promise: Promise ->
             audioPlaybackManager.setVolume(volume, promise)
-        }
-
-        AsyncFunction("pauseAudio") { promise: Promise -> audioPlaybackManager.stopPlayback(promise) }
-
-        AsyncFunction("stopAudio") { promise: Promise -> audioPlaybackManager.stopPlayback(promise) }
-
-        AsyncFunction("clearAudioFiles") { promise: Promise ->
-            audioRecorderManager.clearAudioStorage(promise)
-        }
-
-        AsyncFunction("listAudioFiles") { promise: Promise ->
-            audioRecorderManager.listAudioFiles(promise)
         }
 
         AsyncFunction("playSound") { chunk: String, turnId: String, encoding: String?, promise: Promise ->
@@ -211,14 +161,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
                 }
             }
             audioPlaybackManager.playAudio(chunk, turnId, promise, pcmEncoding)
-        }
-
-        AsyncFunction("playWav") { chunk: String, promise: Promise ->
-            wavAudioPlayer.playWavFile(chunk, promise)
-        }
-
-        AsyncFunction("stopWav") { promise: Promise ->
-            wavAudioPlayer.stopWavPlayback(promise)
         }
 
         AsyncFunction("stopSound") { promise: Promise -> audioPlaybackManager.stopPlayback(promise) }
@@ -323,10 +265,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
 
     private fun initializePlaybackManager() {
         audioPlaybackManager = AudioPlaybackManager(this)
-    }
-
-    private fun initializeWavPlayer() {
-        wavAudioPlayer = WavAudioPlayer()
     }
 
     private fun initializePipeline() {
