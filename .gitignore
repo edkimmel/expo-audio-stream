@@ -57,8 +57,6 @@ yarn-error.log
 .expo/*
 
 # Example
-/example/ios/*
-/example/android/*
 example/ios/expoaudiostreamexample.xcodeproj/project.pbxproj
 .cursor/
 .claude/

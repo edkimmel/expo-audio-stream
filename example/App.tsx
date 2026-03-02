@@ -1,13 +1,14 @@
-import { Button, Platform, StyleSheet, Text, View } from "react-native";
-import { ExpoPlayAudioStream } from "@edkimmel/expo-audio-stream";
-import { useEffect, useRef } from "react";
+import { Button, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  ExpoPlayAudioStream,
+  Pipeline,
+} from "@edkimmel/expo-audio-stream";
+import { useEffect, useRef, useState } from "react";
 import { sampleA } from "./samples/sample-a";
 import { sampleB } from "./samples/sample-b";
-import { sampleC } from "./samples/sample-c";
-import {
+import type {
   AudioDataEvent,
-  EncodingTypes,
-} from "@edkimmel/expo-audio-stream/types";
+} from "@edkimmel/expo-audio-stream";
 import type { EventSubscription } from "expo-modules-core";
 
 const ANDROID_SAMPLE_RATE = 16000;
@@ -23,88 +24,143 @@ const turnId1 = "turnId1";
 const turnId2 = "turnId2";
 
 export default function App() {
+  const [pipelineState, setPipelineState] = useState<string>("idle");
+  const [isRecording, setIsRecording] = useState(false);
+
   const eventListenerSubscriptionRef = useRef<EventSubscription | undefined>(
     undefined
   );
 
+  const pipelineSubsRef = useRef<{ remove: () => void }[]>([]);
+
   const onAudioCallback = async (audio: AudioDataEvent) => {
-    console.log(audio.data.slice(0, 100));
+    console.log("Mic data:", audio.data.slice(0, 100));
   };
 
-  const playEventsListenerSubscriptionRef = useRef<
-    EventSubscription | undefined
-  >(undefined);
-
+  // Subscribe to sound chunk played events
   useEffect(() => {
-    playEventsListenerSubscriptionRef.current =
-      ExpoPlayAudioStream.subscribeToSoundChunkPlayed(async (event) => {
-        console.log(event);
-      });
+    const sub = ExpoPlayAudioStream.subscribeToSoundChunkPlayed(
+      async (event) => {
+        console.log("Sound chunk played:", event);
+      }
+    );
 
     return () => {
-      if (playEventsListenerSubscriptionRef.current) {
-        playEventsListenerSubscriptionRef.current.remove();
-        playEventsListenerSubscriptionRef.current = undefined;
-      }
+      sub.remove();
+      ExpoPlayAudioStream.destroy();
     };
   }, []);
 
+  const connectPipeline = async () => {
+    try {
+      const result = await Pipeline.connect({
+        sampleRate: 24000,
+        channelCount: 1,
+        targetBufferMs: 80,
+      });
+      console.log("Pipeline connected:", result);
+
+      // Subscribe to pipeline events
+      const stateSub = Pipeline.subscribe(
+        "PipelineStateChanged",
+        async (e) => {
+          console.log("Pipeline state:", e.state);
+          setPipelineState(e.state);
+        }
+      );
+
+      const errorSub = Pipeline.onError((err) => {
+        console.error(`Pipeline error: ${err.code} - ${err.message}`);
+      });
+
+      const drainSub = Pipeline.subscribe("PipelineDrained", async (e) => {
+        console.log("Pipeline drained turn:", e.turnId);
+      });
+
+      pipelineSubsRef.current = [stateSub, errorSub, drainSub];
+    } catch (err) {
+      console.error("Pipeline connect failed:", err);
+    }
+  };
+
+  const disconnectPipeline = async () => {
+    try {
+      await Pipeline.disconnect();
+      pipelineSubsRef.current.forEach((s) => s.remove());
+      pipelineSubsRef.current = [];
+      setPipelineState("idle");
+    } catch (err) {
+      console.error("Pipeline disconnect failed:", err);
+    }
+  };
+
+  const pushSampleToPipeline = () => {
+    // Push sample audio through the pipeline
+    // Note: samples are 16kHz PCM16 -- pipeline expects the configured rate (24kHz)
+    // In production you'd push audio at the rate Pipeline.connect() was configured with
+    const success = Pipeline.pushAudioSync({
+      audio: sampleA,
+      turnId: "pipeline-turn-1",
+      isFirstChunk: true,
+      isLastChunk: true,
+    });
+    console.log("Pipeline push:", success ? "ok" : "failed");
+  };
+
   return (
-    <View style={styles.container}>
-      <Text>hi</Text>
+    <ScrollView contentContainerStyle={styles.container}>
+      <Text style={styles.header}>expo-audio-stream</Text>
+
+      {/* ── Sound Playback ──────────────────────────────── */}
+      <Text style={styles.section}>Sound Playback</Text>
+
       <Button
         onPress={async () => {
-          // Set sample rate to match the audio file (16kHz)
           await ExpoPlayAudioStream.setSoundConfig({
             sampleRate: SAMPLE_PLAYBACK_RATE,
             playbackMode: "regular",
           });
           await ExpoPlayAudioStream.playSound(sampleB, turnId1);
         }}
-        title="Play sample B"
+        title="Play Sample B (turn 1)"
       />
-      <View style={{ height: 10, marginBottom: 10 }}>
-        <Text>====================</Text>
-      </View>
+      <Spacer />
+
       <Button
         onPress={async () => {
-          await ExpoPlayAudioStream.pauseAudio();
-        }}
-        title="Pause Audio"
-      />
-      <View style={{ height: 10, marginBottom: 10 }}>
-        <Text>====================</Text>
-      </View>
-      <Button
-        onPress={async () => {
-          // Set sample rate to match the audio file (16kHz)
           await ExpoPlayAudioStream.setSoundConfig({
             sampleRate: SAMPLE_PLAYBACK_RATE,
             playbackMode: "regular",
           });
           await ExpoPlayAudioStream.playSound(sampleA, turnId2);
         }}
-        title="Play sample A"
+        title="Play Sample A (turn 2)"
       />
-      <View style={{ height: 10, marginBottom: 10 }}>
-        <Text>====================</Text>
-      </View>
+      <Spacer />
+
       <Button
         onPress={async () => {
-          await ExpoPlayAudioStream.playWav(sampleC);
+          await ExpoPlayAudioStream.stopSound();
         }}
-        title="Play WAV fragment"
+        title="Stop Sound"
       />
-      <View style={{ height: 10, marginBottom: 10 }}>
-        <Text>====================</Text>
-      </View>
+      <Spacer />
+
+      <Button
+        onPress={async () => {
+          await ExpoPlayAudioStream.clearSoundQueueByTurnId(turnId1);
+        }}
+        title="Clear Turn 1 Queue"
+      />
+
+      {/* ── Microphone ─────────────────────────────────── */}
+      <Text style={styles.section}>Microphone</Text>
+
       <Button
         onPress={async () => {
           if (!(await isMicrophonePermissionGranted())) {
-            const permissionGranted = await requestMicrophonePermission();
-            if (!permissionGranted) {
-              return;
-            }
+            const granted = await requestMicrophonePermission();
+            if (!granted) return;
           }
           const sampleRate =
             Platform.OS === "ios" ? IOS_SAMPLE_RATE : ANDROID_SAMPLE_RATE;
@@ -116,52 +172,101 @@ export default function App() {
               encoding: ENCODING,
               onAudioStream: onAudioCallback,
             });
-          console.log(JSON.stringify(recordingResult, null, 2));
+          console.log("Recording started:", JSON.stringify(recordingResult));
           eventListenerSubscriptionRef.current = subscription;
+          setIsRecording(true);
         }}
-        title="Start Recording"
+        title="Start Microphone"
       />
-      <View style={{ height: 10, marginBottom: 10 }}>
-        <Text>====================</Text>
-      </View>
+      <Spacer />
+
       <Button
         onPress={async () => {
           await ExpoPlayAudioStream.stopMicrophone();
-          if (eventListenerSubscriptionRef.current) {
-            eventListenerSubscriptionRef.current.remove();
-            eventListenerSubscriptionRef.current = undefined;
-          }
+          eventListenerSubscriptionRef.current?.remove();
+          eventListenerSubscriptionRef.current = undefined;
+          setIsRecording(false);
         }}
-        title="Stop Recording"
+        title="Stop Microphone"
       />
-      <View style={{ height: 10, marginBottom: 10 }}>
-        <Text>====================</Text>
-      </View>
+
+      <Text style={styles.status}>
+        Mic: {isRecording ? "recording" : "idle"}
+      </Text>
+
+      {/* ── Pipeline ───────────────────────────────────── */}
+      <Text style={styles.section}>Pipeline</Text>
+
+      <Button onPress={connectPipeline} title="Connect Pipeline" />
+      <Spacer />
+
+      <Button onPress={pushSampleToPipeline} title="Push Sample to Pipeline" />
+      <Spacer />
+
       <Button
-        onPress={async () => {
-          await ExpoPlayAudioStream.clearPlaybackQueueByTurnId(turnId1);
+        onPress={() => {
+          Pipeline.invalidateTurn({ turnId: "pipeline-turn-2" });
+          console.log("Turn invalidated");
         }}
-        title="Clear turnId1"
+        title="Invalidate Turn"
       />
-    </View>
+      <Spacer />
+
+      <Button
+        onPress={() => {
+          const telemetry = Pipeline.getTelemetry();
+          console.log("Telemetry:", JSON.stringify(telemetry, null, 2));
+        }}
+        title="Log Telemetry"
+      />
+      <Spacer />
+
+      <Button onPress={disconnectPipeline} title="Disconnect Pipeline" />
+
+      <Text style={styles.status}>Pipeline: {pipelineState}</Text>
+    </ScrollView>
   );
+}
+
+function Spacer() {
+  return <View style={{ height: 8 }} />;
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    flexGrow: 1,
     backgroundColor: "#fff",
     alignItems: "center",
     justifyContent: "center",
+    paddingVertical: 60,
+    paddingHorizontal: 20,
+  },
+  header: {
+    fontSize: 20,
+    fontWeight: "bold",
+    marginBottom: 20,
+  },
+  section: {
+    fontSize: 16,
+    fontWeight: "600",
+    marginTop: 24,
+    marginBottom: 10,
+    alignSelf: "flex-start",
+    color: "#333",
+  },
+  status: {
+    marginTop: 8,
+    fontSize: 13,
+    color: "#666",
   },
 });
 
-export const requestMicrophonePermission = async (): Promise<boolean> => {
+const requestMicrophonePermission = async (): Promise<boolean> => {
   const result = await ExpoPlayAudioStream.requestPermissionsAsync();
   return result.granted;
 };
 
-export const isMicrophonePermissionGranted = async (): Promise<boolean> => {
+const isMicrophonePermissionGranted = async (): Promise<boolean> => {
   const result = await ExpoPlayAudioStream.getPermissionsAsync();
   return result.granted;
 };

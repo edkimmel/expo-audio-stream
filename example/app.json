@@ -16,7 +16,8 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.edkimmel.audiostream.dev"
+      "bundleIdentifier": "com.edkimmel.audiostream.dev",
+      "appleTeamId": "AA57YM3MU3"
     },
     "android": {
       "adaptiveIcon": {
@@ -34,6 +35,8 @@
       }
     },
     "owner": "edkimmel",
-    "plugins": ["../app.plugin.js"]
+    "plugins": [
+      "../app.plugin.js"
+    ]
   }
 }
