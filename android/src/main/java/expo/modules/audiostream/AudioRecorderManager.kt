@@ -490,11 +490,12 @@ class AudioRecorderManager(
             return null
         }
         
-        // Always use VOICE_COMMUNICATION for better echo cancellation
-        val audioSource = MediaRecorder.AudioSource.VOICE_COMMUNICATION
-        
+        // Use VOICE_RECOGNITION for far-field/speakerphone use — higher mic gain,
+        // no near-field gain reduction. AEC/NS/AGC are applied separately via AudioEffectsManager.
+        val audioSource = MediaRecorder.AudioSource.VOICE_RECOGNITION
+
         val record = AudioRecord(
-            audioSource, // Using VOICE_COMMUNICATION for built-in echo cancellation
+            audioSource,
             config.sampleRate,
             if (config.channels == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO,
             audioFormat,
