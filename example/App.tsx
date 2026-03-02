@@ -11,11 +11,11 @@ import type {
 } from "@edkimmel/expo-audio-stream";
 import type { EventSubscription } from "expo-modules-core";
 
-const ANDROID_SAMPLE_RATE = 16000;
-const IOS_SAMPLE_RATE = 48000;
+const ANDROID_SAMPLE_RATE = 24000;
+const IOS_SAMPLE_RATE = 24000;
 const CHANNELS = 1;
 const ENCODING = "pcm_16bit";
-const RECORDING_INTERVAL = 100;
+const RECORDING_INTERVAL = 30;
 
 // Sample audio files are encoded at 16kHz
 const SAMPLE_PLAYBACK_RATE = 16000;
@@ -34,7 +34,8 @@ export default function App() {
   const pipelineSubsRef = useRef<{ remove: () => void }[]>([]);
 
   const onAudioCallback = async (audio: AudioDataEvent) => {
-    console.log("Mic data:", audio.data.slice(0, 100));
+    const nowMilliseconds = Date.now() % 1000;
+    console.log(`Mic data ${nowMilliseconds}:`, audio.data.slice(0, 100));
   };
 
   // Subscribe to sound chunk played events
@@ -54,13 +55,13 @@ export default function App() {
   const connectPipeline = async () => {
     try {
       const result = await Pipeline.connect({
-        sampleRate: 24000,
+        sampleRate: SAMPLE_PLAYBACK_RATE,
         channelCount: 1,
         targetBufferMs: 80,
       });
       console.log("Pipeline connected:", result);
 
-      // Subscribe to pipeline events
+      // Subscribe to all pipeline events
       const stateSub = Pipeline.subscribe(
         "PipelineStateChanged",
         async (e) => {
@@ -69,15 +70,40 @@ export default function App() {
         }
       );
 
+      const playbackStartedSub = Pipeline.subscribe(
+        "PipelinePlaybackStarted",
+        async (e) => {
+          console.log("Pipeline playback started, turnId:", e.turnId);
+        }
+      );
+
+      const drainSub = Pipeline.subscribe("PipelineDrained", async (e) => {
+        console.log("Pipeline drained, turnId:", e.turnId);
+      });
+
+      const underrunSub = Pipeline.subscribe(
+        "PipelineUnderrun",
+        async (e) => {
+          console.log("Pipeline underrun, count:", e.count);
+        }
+      );
+
       const errorSub = Pipeline.onError((err) => {
         console.error(`Pipeline error: ${err.code} - ${err.message}`);
       });
 
-      const drainSub = Pipeline.subscribe("PipelineDrained", async (e) => {
-        console.log("Pipeline drained turn:", e.turnId);
+      const focusSub = Pipeline.onAudioFocus((e) => {
+        console.log("Pipeline audio focus:", e.focused ? "resumed" : "lost");
       });
 
-      pipelineSubsRef.current = [stateSub, errorSub, drainSub];
+      pipelineSubsRef.current = [
+        stateSub,
+        playbackStartedSub,
+        drainSub,
+        underrunSub,
+        errorSub,
+        focusSub,
+      ];
     } catch (err) {
       console.error("Pipeline connect failed:", err);
     }
@@ -95,9 +121,6 @@ export default function App() {
   };
 
   const pushSampleToPipeline = () => {
-    // Push sample audio through the pipeline
-    // Note: samples are 16kHz PCM16 -- pipeline expects the configured rate (24kHz)
-    // In production you'd push audio at the rate Pipeline.connect() was configured with
     const success = Pipeline.pushAudioSync({
       audio: sampleA,
       turnId: "pipeline-turn-1",
@@ -105,6 +128,19 @@ export default function App() {
       isLastChunk: true,
     });
     console.log("Pipeline push:", success ? "ok" : "failed");
+  };
+
+  const pushSample10x = () => {
+    const turnId = "pipeline-turn-10x";
+    for (let i = 0; i < 10; i++) {
+      const success = Pipeline.pushAudioSync({
+        audio: sampleA,
+        turnId,
+        isFirstChunk: i === 0,
+        isLastChunk: i === 9,
+      });
+      console.log(`Pipeline push ${i + 1}/10:`, success ? "ok" : "failed");
+    }
   };
 
   return (
@@ -201,6 +237,9 @@ export default function App() {
       <Spacer />
 
       <Button onPress={pushSampleToPipeline} title="Push Sample to Pipeline" />
+      <Spacer />
+
+      <Button onPress={pushSample10x} title="Push Sample 10x (buffer test)" />
       <Spacer />
 
       <Button

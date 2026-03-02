@@ -12,15 +12,12 @@ class Microphone {
     public private(set) var isVoiceProcessingEnabled: Bool = false
     
     
-    internal var lastEmissionTime: Date?
     internal var lastEmittedSize: Int64 = 0
-    private var emissionInterval: TimeInterval = 1.0 // Default to 1 second
     private var totalDataSize: Int64 = 0
     internal var recordingSettings: RecordingSettings?
-    
+
     internal var mimeType: String = "audio/wav"
     private var lastBufferTime: AVAudioTime?
-    private var accumulatedData = Data()
     
     private var startTime: Date?
     private var pauseStartTime: Date?
@@ -88,47 +85,27 @@ class Microphone {
         }
        
         var newSettings = settings  // Make settings mutable
-        
-        // Determine the commonFormat based on bitDepth
-        let commonFormat: AVAudioCommonFormat = AudioUtils.getCommonFormat(depth: newSettings.bitDepth)
-        
-        emissionInterval = max(100.0, Double(intervalMilliseconds)) / 1000.0
-        lastEmissionTime = Date()
-        accumulatedData.removeAll()
+
         totalDataSize = 0
         
-        let session = AVAudioSession.sharedInstance()
-        Logger.debug("Debug: Configuring audio session with sample rate: \(settings.sampleRate) Hz")
-        
-        // Check if the input node supports the desired format
+        // Use the hardware's native format for the tap to avoid Core Audio format mismatch crashes.
+        // The inputNode delivers audio in the hardware format (e.g. 48kHz Float32).
+        // Resampling and format conversion to the desired settings happens in processAudioBuffer.
         let hardwareFormat = audioEngine.inputNode.inputFormat(forBus: 0)
-        if hardwareFormat.sampleRate != newSettings.sampleRate {
-            Logger.debug("Debug: Preferred sample rate not supported. Falling back to hardware sample rate \(session.sampleRate).")
-            newSettings.sampleRate = session.sampleRate
-        }
-        
-        let actualSampleRate = session.sampleRate
-        if actualSampleRate != newSettings.sampleRate {
-            Logger.debug("Debug: Preferred sample rate not set. Falling back to hardware sample rate: \(actualSampleRate) Hz")
-            newSettings.sampleRate = actualSampleRate
-        }
-        Logger.debug("Debug: Audio session is successfully configured. Actual sample rate is \(actualSampleRate) Hz")
-        
+        newSettings.sampleRate = hardwareFormat.sampleRate
+        Logger.debug("Debug: Hardware sample rate is \(hardwareFormat.sampleRate) Hz, desired sample rate is \(settings.sampleRate) Hz")
+
         recordingSettings = newSettings  // Update the class property with the new settings
-        
-        // Correct the format to use 16-bit integer (PCM)
-        guard let audioFormat = AVAudioFormat(commonFormat: commonFormat, sampleRate: newSettings.sampleRate, channels: UInt32(newSettings.numberOfChannels), interleaved: true) else {
-            Logger.debug("Error: Failed to create audio format with the specified bit depth.")
-            return StartRecordingResult(error: "Error: Failed to create audio format with the specified bit depth.")
-        }
-        
+
         // Compute tap buffer size from interval so Core Audio delivers at the right cadence
         let intervalSamples = AVAudioFrameCount(
-            max(Double(intervalMilliseconds), 100.0) / 1000.0 * newSettings.sampleRate
+            Double(intervalMilliseconds) / 1000.0 * hardwareFormat.sampleRate
         )
-        let tapBufferSize = max(intervalSamples, 256) // floor at 256 frames
+        let tapBufferSize = max(intervalSamples, 256) // floor at 256 frames (~5ms at 48kHz)
 
-        audioEngine.inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: audioFormat) { [weak self] (buffer, time) in
+        // Pass nil for format to use the hardware's native format, avoiding format mismatch crashes.
+        // Core Audio does not support format conversion (e.g. Float32 -> Int16) on the tap itself.
+        audioEngine.inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: nil) { [weak self] (buffer, time) in
             guard let self = self else { return }
 
             guard buffer.frameLength > 0 else {
@@ -187,43 +164,53 @@ class Microphone {
     ///   - fileURL: The URL of the file to write the data to.
     private func processAudioBuffer(_ buffer: AVAudioPCMBuffer) {
         let targetSampleRate = recordingSettings?.desiredSampleRate ?? buffer.format.sampleRate
-        let finalBuffer: AVAudioPCMBuffer
-               
-        
-        if buffer.format.sampleRate != targetSampleRate {
-            // Resample the audio buffer if the target sample rate is different from the input sample rate
-            if let resampledBuffer = AudioUtils.resampleAudioBuffer(buffer, from: buffer.format.sampleRate, to: targetSampleRate) {
-                finalBuffer = resampledBuffer
+        let targetBitDepth = recordingSettings?.bitDepth ?? 16
+        var currentBuffer = buffer
+
+        // Resample if needed
+        if currentBuffer.format.sampleRate != targetSampleRate {
+            if let resampledBuffer = AudioUtils.resampleAudioBuffer(currentBuffer, from: currentBuffer.format.sampleRate, to: targetSampleRate) {
+                currentBuffer = resampledBuffer
+            } else if let convertedBuffer = AudioUtils.tryConvertToFormat(
+                inputBuffer: currentBuffer,
+                desiredSampleRate: targetSampleRate,
+                desiredChannel: 1,
+                bitDepth: targetBitDepth
+            ) {
+                currentBuffer = convertedBuffer
             } else {
-                if let convertedBuffer = AudioUtils.tryConvertToFormat(
-                    inputBuffer: buffer,
-                    desiredSampleRate: targetSampleRate,
-                    desiredChannel: 1,
-                    bitDepth: recordingSettings?.bitDepth ?? 16
-                ) {
-                    finalBuffer = convertedBuffer
-                } else {
-                    Logger.debug("Failed to convert to desired format.")
-                    finalBuffer = buffer
+                Logger.debug("Failed to resample audio buffer.")
+            }
+        }
+
+        let powerLevel: Float = self.isSilent ? -160.0 : AudioUtils.calculatePowerLevel(from: currentBuffer)
+
+        // Convert Float32 → Int16 PCM if needed (the tap delivers hardware-native Float32)
+        let data: Data
+        if isSilent {
+            let byteCount = Int(currentBuffer.frameCapacity) * Int(currentBuffer.format.streamDescription.pointee.mBytesPerFrame)
+            data = Data(repeating: 0, count: byteCount)
+        } else if targetBitDepth == 16 && currentBuffer.format.commonFormat == .pcmFormatFloat32,
+                  let floatData = currentBuffer.floatChannelData {
+            let frameCount = Int(currentBuffer.frameLength)
+            let channelCount = Int(currentBuffer.format.channelCount)
+            var int16Data = Data(capacity: frameCount * channelCount * 2)
+            for frame in 0..<frameCount {
+                for ch in 0..<channelCount {
+                    let sample = max(-1.0, min(1.0, floatData[ch][frame]))
+                    var int16Sample = Int16(sample * 32767.0)
+                    int16Data.append(Data(bytes: &int16Sample, count: 2))
                 }
             }
+            data = int16Data
         } else {
-            // Use the original buffer if the sample rates are the same
-            finalBuffer = buffer
+            let audioData = currentBuffer.audioBufferList.pointee.mBuffers
+            guard let bufferData = audioData.mData else {
+                Logger.debug("Buffer data is nil.")
+                return
+            }
+            data = Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
         }
-        
-        let powerLevel: Float = self.isSilent ? -160.0 : AudioUtils.calculatePowerLevel(from: finalBuffer)
-        
-        let audioData = finalBuffer.audioBufferList.pointee.mBuffers
-        guard let bufferData = audioData.mData else {
-            Logger.debug("Buffer data is nil.")
-            return
-        }
-        
-        let data = isSilent
-                    ? Data(repeating: 0, count:
-                            Int(finalBuffer.frameCapacity) * Int(finalBuffer.format.streamDescription.pointee.mBytesPerFrame))
-                    : Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
 
         totalDataSize += Int64(data.count)
 

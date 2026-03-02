@@ -302,7 +302,11 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
         if let settings = recordingSettings {
             try audioSession.setPreferredSampleRate(settings.sampleRate)
-            try audioSession.setPreferredIOBufferDuration(1024 / settings.sampleRate)
+            // Set IO buffer duration short enough to support the desired emission interval.
+            // Use the hardware sample rate (not the desired rate) since this is a hardware-level setting.
+            let hwSampleRate = audioSession.sampleRate > 0 ? audioSession.sampleRate : 48000.0
+            let preferredDuration = 512.0 / hwSampleRate  // ~10.7ms at 48kHz
+            try audioSession.setPreferredIOBufferDuration(preferredDuration)
         }
         try audioSession.setActive(true)
         isAudioSessionInitialized = true

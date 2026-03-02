@@ -3,6 +3,7 @@
   "compilerOptions": {
     "strict": true,
     "allowJs": true,
+    "jsx": "react-native",
     "paths": {
       "@edkimmel/expo-audio-stream": [
         "../src/index"

@@ -131,7 +131,10 @@ class JitterBuffer {
             for i in 0..<remaining {
                 dest[destPos + i] = 0
             }
-            underrunCount += 1
+            // Only count as underrun if we expected more data (not drained)
+            if !endOfStream {
+                underrunCount += 1
+            }
         }
 
         totalRead += Int64(len)

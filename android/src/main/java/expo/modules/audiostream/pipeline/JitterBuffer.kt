@@ -145,7 +145,10 @@ class JitterBuffer(
             // Silence-fill remainder on underflow
             if (remaining > 0) {
                 dest.fill(0, destPos, destPos + remaining)
-                underrunCount.incrementAndGet()
+                // Only count as underrun if we expected more data (not drained)
+                if (!endOfStream) {
+                    underrunCount.incrementAndGet()
+                }
             }
 
             totalRead.addAndGet(length.toLong())
