@@ -91,34 +91,6 @@ export class ExpoPlayAudioStream {
   }
 
   /**
-   * Interrupts the current sound.
-   * @returns {Promise<void>}
-   * @throws {Error} If the sound fails to interrupt.
-   */
-  static async interruptSound(): Promise<void> {
-    try {
-      await ExpoPlayAudioStreamModule.interruptSound();
-    } catch (error) {
-      console.error(error);
-      throw new Error(`Failed to stop enqueued audio: ${error}`);
-    }
-  }
-
-  /**
-   * Resumes the current sound.
-   * @returns {Promise<void>}
-   * @throws {Error} If the sound fails to resume.
-   */
-  static resumeSound(): void {
-    try {
-      ExpoPlayAudioStreamModule.resumeSound();
-    } catch (error) {
-      console.error(error);
-      throw new Error(`Failed to resume sound: ${error}`);
-    }
-  }
-
-  /**
    * Clears the sound queue by turn ID.
    * @param {string} turnId - The turn ID.
    * @returns {Promise<void>}

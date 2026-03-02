@@ -15,7 +15,7 @@ jobs:
         with:
           node-version: "18.18.2"
           registry-url: "https://npm.pkg.github.com"
-          scope: "@mykin-ai"
+          scope: "@edkimmel"
         env:
           NPM_PUBLISH_REGISTRY: https://npm.pkg.github.com
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: "18.18.2"
           registry-url: "https://registry.npmjs.org"
-          scope: "@mykin-ai"
+          scope: "@edkimmel"
           always-auth: true
       - run: yarn npm publish --access public
         env:

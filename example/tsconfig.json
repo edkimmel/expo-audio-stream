@@ -4,10 +4,10 @@
     "strict": true,
     "allowJs": true,
     "paths": {
-      "@mykin-ai/expo-audio-stream": [
+      "@edkimmel/expo-audio-stream": [
         "../src/index"
       ],
-      "@mykin-ai/expo-audio-stream/*": [
+      "@edkimmel/expo-audio-stream/*": [
         "../src/*"
       ]
     }

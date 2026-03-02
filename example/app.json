@@ -16,14 +16,14 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "ai.mykin.audiostream.dev"
+      "bundleIdentifier": "com.edkimmel.audiostream.dev"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "ai.mykin.audiostream.dev"
+      "package": "com.edkimmel.audiostream.dev"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -33,7 +33,7 @@
         "projectId": "25f2fa48-a72b-47f2-884a-6c0e4f344684"
       }
     },
-    "owner": "mykin-ai",
+    "owner": "edkimmel",
     "plugins": ["../app.plugin.js"]
   }
 }

@@ -147,10 +147,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             )
         }
 
-        AsyncFunction("setVolume") { volume: Double, promise: Promise ->
-            audioPlaybackManager.setVolume(volume, promise)
-        }
-
         AsyncFunction("playSound") { chunk: String, turnId: String, encoding: String?, promise: Promise ->
             val pcmEncoding = when (encoding) {
                 "pcm_f32le" -> PCMEncoding.PCM_F32LE
@@ -164,12 +160,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         }
 
         AsyncFunction("stopSound") { promise: Promise -> audioPlaybackManager.stopPlayback(promise) }
-
-        AsyncFunction("interruptSound") { promise: Promise -> audioPlaybackManager.stopPlayback(promise) }
-
-        Function("resumeSound") {
-            // not applicable for android
-        }
 
         AsyncFunction("clearSoundQueueByTurnId") { turnId: String, promise: Promise ->
             audioPlaybackManager.setCurrentTurnId(turnId)

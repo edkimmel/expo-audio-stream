@@ -1,5 +1,5 @@
 import { Button, Platform, StyleSheet, Text, View } from "react-native";
-import { ExpoPlayAudioStream } from "@mykin-ai/expo-audio-stream";
+import { ExpoPlayAudioStream } from "@edkimmel/expo-audio-stream";
 import { useEffect, useRef } from "react";
 import { sampleA } from "./samples/sample-a";
 import { sampleB } from "./samples/sample-b";
@@ -7,7 +7,7 @@ import { sampleC } from "./samples/sample-c";
 import {
   AudioDataEvent,
   EncodingTypes,
-} from "@mykin-ai/expo-audio-stream/types";
+} from "@edkimmel/expo-audio-stream/types";
 import type { EventSubscription } from "expo-modules-core";
 
 const ANDROID_SAMPLE_RATE = 16000;

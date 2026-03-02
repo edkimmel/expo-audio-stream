@@ -135,14 +135,6 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             soundPlayer.stop(promise)
         }
 
-        AsyncFunction("interruptSound") { (promise: Promise) in
-            soundPlayer.interrupt(promise)
-        }
-
-        Function("resumeSound") {
-            soundPlayer.resume()
-        }
-
         AsyncFunction("clearSoundQueueByTurnId") { (turnId: String, promise: Promise) in
             soundPlayer.clearSoundQueue(turnIdToClear: turnId, resolver: promise)
         }

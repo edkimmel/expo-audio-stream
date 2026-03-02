@@ -1,5 +1,5 @@
 {
-  "name": "@mykin-ai/expo-audio-stream",
+  "name": "@edkimmel/expo-audio-stream",
   "version": "0.3.5",
   "description": "Expo Play Audio Stream module",
   "main": "build/index.js",
@@ -23,13 +23,13 @@
     "expo-play-audio-stream",
     "ExpoPlayAudioStream"
   ],
-  "repository": "https://github.com/mykin-ai/expo-audio-stream",
+  "repository": "https://github.com/edkimmel/expo-audio-stream",
   "bugs": {
-    "url": "https://github.com/mykin-ai/expo-audio-stream/issues"
+    "url": "https://github.com/edkimmel/expo-audio-stream/issues"
   },
   "author": "pax <nzpopa@users.noreply.github.com> (https://github.com/hyphen-id)",
   "license": "MIT",
-  "homepage": "https://github.com/mykin-ai/expo-audio-stream#readme",
+  "homepage": "https://github.com/edkimmel/expo-audio-stream#readme",
   "devDependencies": {
     "@types/react": "^19.0.0",
     "expo-module-scripts": "^4.0.0",
