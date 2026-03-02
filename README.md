@@ -1,305 +1,289 @@
-# Expo Play Audio Stream 🎶
+# @mykin-ai/expo-audio-stream
 
-The Expo Play Audio Stream module is a powerful tool for recording and streaming audio data in your Expo-based React Native applications. It provides a seamless way to record audio from the microphone and play audio chunks in real-time, allowing you to build audio-centric features like voice assistants, audio players, voice recorders, and more.
+Native audio recording and low-latency playback for Expo/React Native. Designed for real-time voice AI applications: microphone capture, chunked PCM playback, and a jitter-buffered native pipeline for streaming audio from AI backends.
 
-## Motivation 🎯
+## Install
 
-Expo's built-in audio capabilities are limited to playing pre-loaded audio files and basic recording. The Expo Audio Stream module was created to address these limitations, enabling developers to record high-quality audio with real-time streaming capabilities and have more control over both the recording and playback process. The module provides features like dual-stream output (original and 16kHz versions) which is particularly useful for voice activity detection and speech recognition applications.
+```bash
+npx expo install @mykin-ai/expo-audio-stream
+```
 
-## Example Usage 🚀
+## Quick Start
 
-Here's how you can use the Expo Play Audio Stream module for different scenarios:
+### Microphone Recording
 
-### Standard Recording and Playback
+```typescript
+import { ExpoPlayAudioStream } from "@mykin-ai/expo-audio-stream";
 
-```javascript
+const { recordingResult, subscription } =
+  await ExpoPlayAudioStream.startMicrophone({
+    sampleRate: 16000,
+    channels: 1,
+    encoding: "pcm_16bit",
+    interval: 100,
+    onAudioStream: async (event) => {
+      // event.data: base64-encoded PCM chunk
+      // event.soundLevel: current mic level (dB)
+      sendToBackend(event.data);
+    },
+  });
+
+// Later:
+await ExpoPlayAudioStream.stopMicrophone();
+subscription?.remove();
+```
+
+### Chunked Playback (playSound)
+
+For playing base64-encoded PCM audio in a queue with turn management:
+
+```typescript
 import {
   ExpoPlayAudioStream,
   EncodingTypes,
-  PlaybackModes,
-} from "expo-audio-stream";
+} from "@mykin-ai/expo-audio-stream";
 
-// Example of standard recording and playback with specific encoding
-async function handleStandardRecording() {
-  try {
-    // Configure sound playback settings
-    await ExpoPlayAudioStream.setSoundConfig({
-      sampleRate: 44100,
-      playbackMode: PlaybackModes.REGULAR,
-    });
+await ExpoPlayAudioStream.setSoundConfig({
+  sampleRate: 24000,
+  playbackMode: "conversation",
+});
 
-    // Start recording with configuration
-    const { recordingResult, subscription } =
-      await ExpoPlayAudioStream.startRecording({
-        sampleRate: 48000,
-        channels: 1,
-        encoding: "pcm_16bit",
-        interval: 250, // milliseconds
-        onAudioStream: (event) => {
-          console.log("Received audio stream:", {
-            audioDataBase64: event.data,
-            position: event.position,
-            eventDataSize: event.eventDataSize,
-            totalSize: event.totalSize,
-            soundLevel: event.soundLevel, // New property for audio level monitoring
-          });
-        },
-      });
-
-    // After some time, stop recording
-    setTimeout(async () => {
-      const recording = await ExpoPlayAudioStream.stopRecording();
-      console.log("Recording stopped:", recording);
-
-      // Play the recorded audio with specific encoding format
-      const turnId = "example-turn-1";
-      await ExpoPlayAudioStream.playAudio(
-        base64Content,
-        turnId,
-        EncodingTypes.PCM_S16LE
-      );
-
-      // Clean up
-      subscription?.remove();
-    }, 5000);
-  } catch (error) {
-    console.error("Audio handling error:", error);
-  }
-}
-
-// You can also subscribe to audio events from anywhere
-const audioSubscription = ExpoPlayAudioStream.subscribeToAudioEvents(
-  async (event) => {
-    console.log("Audio event received:", {
-      data: event.data,
-      soundLevel: event.soundLevel, // Sound level can be used for visualization or voice detection
-    });
-  }
+// Enqueue chunks as they arrive
+await ExpoPlayAudioStream.playSound(
+  base64Chunk,
+  "turn-1",
+  EncodingTypes.PCM_S16LE
 );
-// Don't forget to clean up when done
-// audioSubscription.remove();
+
+// Listen for playback completion
+const sub = ExpoPlayAudioStream.subscribeToSoundChunkPlayed(async (e) => {
+  if (e.isFinal) console.log("Turn finished playing");
+});
 ```
 
-### Simultaneous Recording and Playback
+### Native Pipeline (recommended for AI voice streaming)
 
-These methods are designed for scenarios where you need to record and play audio at the same time:
+The `Pipeline` class provides jitter-buffered, low-latency playback with a native write thread. Use this for streaming audio from AI backends over WebSockets.
 
-```javascript
-import {
-  ExpoPlayAudioStream,
-  EncodingTypes,
-  PlaybackModes,
-} from "expo-audio-stream";
+```typescript
+import { Pipeline } from "@mykin-ai/expo-audio-stream";
 
-// Example of simultaneous recording and playback with voice processing
-async function handleSimultaneousRecordAndPlay() {
-  try {
-    // Configure sound playback with optimized voice processing settings
-    await ExpoPlayAudioStream.setSoundConfig({
-      sampleRate: 44100,
-      playbackMode: PlaybackModes.VOICE_PROCESSING,
-    });
+// Connect with desired config
+const result = await Pipeline.connect({
+  sampleRate: 24000,
+  channelCount: 1,
+  targetBufferMs: 80,
+});
 
-    // Start microphone with voice processing
-    const { recordingResult, subscription } =
-      await ExpoPlayAudioStream.startMicrophone({
-        enableProcessing: true,
-        onAudioStream: (event) => {
-          console.log("Received audio stream with voice processing:", {
-            audioDataBase64: event.data,
-            soundLevel: event.soundLevel,
-          });
-        },
-      });
+// Subscribe to events
+const errorSub = Pipeline.onError((err) => {
+  console.error(`Pipeline error: ${err.code} - ${err.message}`);
+});
 
-    // Play audio while recording is active, with specific encoding format
-    const turnId = "response-turn-1";
-    await ExpoPlayAudioStream.playSound(
-      someAudioBase64,
-      turnId,
-      EncodingTypes.PCM_F32LE
-    );
-
-    // Play a complete WAV file directly
-    await ExpoPlayAudioStream.playWav(wavBase64Data);
-
-    // Example of controlling playback during recording
-    setTimeout(async () => {
-      // Clear the queue for a specific turn
-      await ExpoPlayAudioStream.clearSoundQueueByTurnId(turnId);
-
-      // Interrupt current playback
-      await ExpoPlayAudioStream.interruptSound();
-
-      // Resume playback
-      await ExpoPlayAudioStream.resumeSound();
-
-      // Stop microphone recording
-      await ExpoPlayAudioStream.stopMicrophone();
-
-      // Clean up
-      subscription?.remove();
-    }, 5000);
-  } catch (error) {
-    console.error("Simultaneous audio handling error:", error);
+const focusSub = Pipeline.onAudioFocus(({ focused }) => {
+  if (!focused) {
+    // Another app took audio focus; re-request audio on regain
   }
+});
+
+// Hot path: push audio synchronously from WebSocket handler
+ws.onmessage = (msg) => {
+  Pipeline.pushAudioSync({
+    audio: msg.data, // base64 PCM16 LE
+    turnId: currentTurnId,
+    isFirstChunk: isFirst,
+    isLastChunk: isLast,
+  });
+};
+
+// On new turn, invalidate stale audio
+Pipeline.invalidateTurn({ turnId: newTurnId });
+
+// Tear down
+await Pipeline.disconnect();
+errorSub.remove();
+focusSub.remove();
+```
+
+## API Reference
+
+### ExpoPlayAudioStream
+
+All methods are static.
+
+#### Lifecycle
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `destroy()` | `void` | Release all resources. Resets internal state on both platforms. |
+
+#### Permissions
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `requestPermissionsAsync()` | `Promise<PermissionResult>` | Prompt the user for microphone permission. |
+| `getPermissionsAsync()` | `Promise<PermissionResult>` | Check the current microphone permission status. |
+
+#### Microphone
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `startMicrophone(config)` | `Promise<{ recordingResult, subscription? }>` | Start mic capture. Audio is delivered as base64 PCM via `onAudioStream` or `subscribeToAudioEvents`. |
+| `stopMicrophone()` | `Promise<AudioRecording \| null>` | Stop mic capture and return recording metadata. |
+| `toggleSilence(isSilent)` | `void` | Mute/unmute the mic stream without stopping the session. Silenced frames are zero-filled. |
+| `promptMicrophoneModes()` | `void` | (iOS only) Show the system voice isolation picker (iOS 15+). |
+
+#### Sound Playback
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `playSound(audio, turnId, encoding?)` | `Promise<void>` | Enqueue a base64 PCM chunk for playback. |
+| `stopSound()` | `Promise<void>` | Stop playback and clear the queue. |
+| `setSoundConfig(config)` | `Promise<void>` | Update playback sample rate and mode. |
+
+#### Event Subscriptions
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `subscribeToAudioEvents(callback)` | `Subscription` | Receive `AudioDataEvent` during mic capture. |
+| `subscribeToSoundChunkPlayed(callback)` | `Subscription` | Notified when a chunk finishes playing. `isFinal` is true when the queue drains. |
+| `subscribe(eventName, callback)` | `Subscription` | Generic event listener for any module event. |
+
+### Pipeline
+
+All methods are static. The pipeline manages its own native write thread, jitter buffer, and audio focus.
+
+#### Lifecycle
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `connect(options?)` | `Promise<ConnectPipelineResult>` | Create the native audio track, jitter buffer, and write thread. Config is immutable per session. |
+| `disconnect()` | `Promise<void>` | Tear down the pipeline and release all native resources. |
+
+#### Audio Push
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `pushAudio(options)` | `Promise<void>` | Push base64 PCM16 LE audio (async, with error propagation). |
+| `pushAudioSync(options)` | `boolean` | Push audio synchronously. No Promise overhead -- use in WebSocket `onmessage` for minimum latency. Returns `false` on failure. |
+
+#### Turn Management
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `invalidateTurn(options)` | `Promise<void>` | Discard buffered audio for the old turn. The jitter buffer is reset. |
+
+#### State & Telemetry
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `getState()` | `PipelineState` | Current state: `idle`, `connecting`, `streaming`, `draining`, or `error`. |
+| `getTelemetry()` | `PipelineTelemetry` | Snapshot of buffer levels, push counts, write loops, underruns, etc. |
+
+#### Event Subscriptions
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `subscribe(eventName, listener)` | `EventSubscription` | Type-safe subscription to any pipeline event. |
+| `onError(listener)` | `{ remove }` | Convenience: handles both `PipelineError` and `PipelineZombieDetected`. |
+| `onAudioFocus(listener)` | `{ remove }` | Convenience: `{ focused: true/false }` on audio focus changes. |
+
+## Configuration Types
+
+### RecordingConfig
+
+```typescript
+interface RecordingConfig {
+  sampleRate?: 16000 | 24000 | 44100 | 48000;
+  channels?: 1 | 2;
+  encoding?: "pcm_32bit" | "pcm_16bit" | "pcm_8bit";
+  interval?: number; // ms between audio data emissions (default 1000)
+  onAudioStream?: (event: AudioDataEvent) => Promise<void>;
 }
 ```
 
-## API 📚
+### SoundConfig
 
-The Expo Play Audio Stream module provides the following methods:
+```typescript
+interface SoundConfig {
+  sampleRate?: 16000 | 24000 | 44100 | 48000;
+  playbackMode?: "regular" | "voiceProcessing" | "conversation";
+  useDefault?: boolean; // reset to defaults
+}
+```
 
-### Standard Audio Operations
+### ConnectPipelineOptions
 
-- `destroy()`: Destroys the audio stream module, cleaning up all resources. This should be called when the module is no longer needed. It will reset all internal state and release audio resources.
+```typescript
+interface ConnectPipelineOptions {
+  sampleRate?: number;     // default 24000
+  channelCount?: number;   // default 1 (mono)
+  targetBufferMs?: number; // ms to buffer before priming gate opens (default 80)
+}
+```
 
-- `startRecording(recordingConfig: RecordingConfig)`: Starts microphone recording with the specified configuration. Returns a promise with recording result and audio event subscription. Throws an error if the recording fails to start.
+### PushPipelineAudioOptions
 
-- `stopRecording()`: Stops the current microphone recording. Returns a promise that resolves to the audio recording data. Throws an error if the recording fails to stop.
+```typescript
+interface PushPipelineAudioOptions {
+  audio: string;           // base64-encoded PCM 16-bit signed LE
+  turnId: string;
+  isFirstChunk?: boolean;  // resets jitter buffer
+  isLastChunk?: boolean;   // marks end-of-stream, begins drain
+}
+```
 
-- `playAudio(base64Chunk: string, turnId: string, encoding?: Encoding)`: Plays a base64 encoded audio chunk with the specified turn ID. The optional encoding parameter allows specifying the format of the audio data ('pcm_f32le' or 'pcm_s16le', defaults to 'pcm_s16le'). Throws an error if the audio chunk fails to stream.
+## Events
 
-- `pauseAudio()`: Pauses the current audio playback. Throws an error if the audio playback fails to pause.
+### Core Events
 
-- `stopAudio()`: Stops the currently playing audio. Throws an error if the audio fails to stop.
+| Event | Payload | Description |
+|-------|---------|-------------|
+| `AudioData` | `{ encoded, position, deltaSize, totalSize, soundLevel, ... }` | Emitted during mic capture at the configured interval. |
+| `SoundChunkPlayed` | `{ isFinal: boolean }` | A queued chunk finished playing. `isFinal` when the queue is empty. |
+| `SoundStarted` | (none) | Playback began for a new turn. |
+| `DeviceReconnected` | `{ reason }` | Audio route changed (headphones, Bluetooth, etc). |
 
-- `clearPlaybackQueueByTurnId(turnId: string)`: Clears the playback queue for a specific turn ID. Throws an error if the playback queue fails to clear.
+### Pipeline Events
 
-- `setSoundConfig(config: SoundConfig)`: Sets the sound player configuration with options for sample rate and playback mode. The SoundConfig interface accepts:
+| Event | Payload | Description |
+|-------|---------|-------------|
+| `PipelineStateChanged` | `{ state }` | Pipeline state transition. |
+| `PipelinePlaybackStarted` | `{ turnId }` | Priming gate opened, audio is now audible. |
+| `PipelineError` | `{ code, message }` | Non-recoverable error. |
+| `PipelineZombieDetected` | `{ playbackHead, stalledMs }` | Audio track stalled. |
+| `PipelineUnderrun` | `{ count }` | Jitter buffer underrun (silence inserted). |
+| `PipelineDrained` | `{ turnId }` | All buffered audio for the turn has been played. |
+| `PipelineAudioFocusLost` | (empty) | Another app took audio focus. |
+| `PipelineAudioFocusResumed` | (empty) | Audio focus regained. |
 
-  - `sampleRate`: The sample rate for audio playback in Hz (16000, 44100, or 48000)
-  - `playbackMode`: The playback mode ('regular', 'voiceProcessing', or 'conversation')
-  - `useDefault`: When true, resets to default configuration regardless of other parameters
+## Constants
 
-  Default settings are:
+```typescript
+import {
+  EncodingTypes,           // { PCM_F32LE: "pcm_f32le", PCM_S16LE: "pcm_s16le" }
+  PlaybackModes,           // { REGULAR, VOICE_PROCESSING, CONVERSATION }
+  AudioEvents,             // { AudioData, SoundChunkPlayed, SoundStarted, DeviceReconnected }
+  SuspendSoundEventTurnId, // "suspend-sound-events" -- suppresses playback events
+} from "@mykin-ai/expo-audio-stream";
+```
 
-  - Android: sampleRate: 44100, playbackMode: 'regular'
-  - iOS: sampleRate: 44100.0, playbackMode: 'regular'
+## Platform Notes
 
-### Simultaneous Recording and Playback
+### iOS
 
-These methods are specifically designed for scenarios where you need to record and play audio at the same time:
+- Uses `AVAudioEngine` with `AVAudioPlayerNode` for sound playback and pipeline audio.
+- Microphone capture via `AVAudioEngine.inputNode` tap.
+- Audio session configured as `.playAndRecord` with `.voiceChat` mode.
+- Voice processing (AEC/noise reduction) available via `voiceProcessing` and `conversation` playback modes.
+- `promptMicrophoneModes()` exposes the iOS 15+ system voice isolation picker.
 
-- `startMicrophone(recordingConfig: RecordingConfig)`: Starts microphone streaming with voice processing enabled. Returns a promise that resolves to an object containing the recording result and a subscription to audio events. Throws an error if the recording fails to start.
+### Android
 
-- `stopMicrophone()`: Stops the current microphone streaming. Returns a promise that resolves to the audio recording data or null. Throws an error if the microphone streaming fails to stop.
+- Uses `AudioTrack` (float PCM, `MODE_STREAM`) for sound playback.
+- Microphone capture via `AudioRecord` with `VOICE_RECOGNITION` source for far-field mic gain.
+- AEC, noise suppression, and AGC applied via `AudioEffectsManager`.
 
-- `playSound(audio: string, turnId: string, encoding?: Encoding)`: Plays a sound while recording is active. Uses voice processing to prevent feedback. The optional encoding parameter allows specifying the format of the audio data ('pcm_f32le' or 'pcm_s16le', defaults to 'pcm_s16le'). Throws an error if the sound fails to play.
+## License
 
-- `stopSound()`: Stops the currently playing sound in simultaneous mode. Throws an error if the sound fails to stop.
-
-- `interruptSound()`: Interrupts the current sound playback in simultaneous mode. Throws an error if the sound fails to interrupt.
-
-- `resumeSound()`: Resumes the current sound playback in simultaneous mode. Throws an error if the sound fails to resume.
-
-- `clearSoundQueueByTurnId(turnId: string)`: Clears the sound queue for a specific turn ID in simultaneous mode. Throws an error if the sound queue fails to clear.
-
-- `playWav(wavBase64: string)`: Plays a WAV format audio file from base64 encoded data. Unlike playSound(), this method plays the audio directly without queueing. The audio data should be base64 encoded WAV format. Throws an error if the WAV audio fails to play.
-
-- `toggleSilence(isSilent: boolean)`: Toggles the silence state of the microphone during recording. This can be useful for temporarily muting the microphone without stopping the recording session. Throws an error if the microphone fails to toggle silence.
-
-- `promptMicrophoneModes()`: Prompts the user to select the microphone mode (iOS specific feature).
-
-### Buffered Audio Streaming
-
-These methods enable jitter-buffered playback with health monitoring and adaptive behavior:
-
-- `startBufferedAudioStream(config: BufferedStreamConfig)`: Starts a buffered audio stream for the given turn ID. Initializes an internal buffer manager, optionally sets encoding, begins playback, and (optionally) starts periodic health reporting via `onBufferHealth`.
-
-- `playAudioBuffered(base64Chunk: string, turnId: string, isFirst?: boolean, isFinal?: boolean)`: Enqueues a base64-encoded audio chunk for buffered playback for the specified turn. Use `isFirst`/`isFinal` to mark boundaries.
-
-- `stopBufferedAudioStream(turnId: string)`: Stops buffered playback for the given turn ID, destroys internal resources, and clears the native queue for that turn.
-
-- `getBufferHealthMetrics(turnId: string): IBufferHealthMetrics | null`: Returns the current buffer health metrics for a turn if available, otherwise `null`.
-
-- `isBufferedAudioStreamPlaying(turnId: string): boolean`: Returns whether the buffered stream for the given turn ID is actively playing.
-
-- `updateBufferedAudioConfig(turnId: string, config: Partial<IAudioBufferConfig>)`: Updates buffer configuration on the fly and applies adaptive adjustments.
-
-### Event Subscriptions
-
-- `subscribeToAudioEvents(onMicrophoneStream: (event: AudioDataEvent) => Promise<void>)`: Subscribes to audio events emitted during recording/streaming. The callback receives an AudioDataEvent containing:
-
-  - `data`: Base64 encoded audio data at original sample rate
-  - `position`: Current position in the audio stream
-  - `fileUri`: URI of the recording file
-  - `eventDataSize`: Size of the current audio data chunk
-  - `totalSize`: Total size of recorded audio so far
-  - `soundLevel`: Optional sound level measurement that can be used for visualization
-    Returns a subscription that should be cleaned up when no longer needed.
-
-- `subscribeToSoundChunkPlayed(onSoundChunkPlayed: (event: SoundChunkPlayedEventPayload) => Promise<void>)`: Subscribes to events emitted when a sound chunk has finished playing. The callback receives a payload indicating if this was the final chunk. Returns a subscription that should be cleaned up when no longer needed.
-
-- `subscribe<T>(eventName: string, onEvent: (event: T | undefined) => Promise<void>)`: Generic subscription method for any event emitted by the module. Available events include:
-  - `AudioData`: Emitted when new audio data is available during recording
-  - `SoundChunkPlayed`: Emitted when a sound chunk finishes playing
-  - `SoundStarted`: Emitted when sound playback begins
-
-Note: When playing audio, you can use the special turnId `"supspend-sound-events"` to suppress sound events for that particular playback. This is useful when you want to play audio without triggering the sound events.
-
-### Types
-
-- `Encoding`: Defines the audio encoding format, either 'pcm_f32le' (32-bit float) or 'pcm_s16le' (16-bit signed integer)
-- `EncodingTypes`: Constants for audio encoding formats (EncodingTypes.PCM_F32LE, EncodingTypes.PCM_S16LE)
-- `PlaybackMode`: Defines different playback modes ('regular', 'voiceProcessing', or 'conversation')
-- `PlaybackModes`: Constants for playback modes (PlaybackModes.REGULAR, PlaybackModes.VOICE_PROCESSING, PlaybackModes.CONVERSATION)
-- `SampleRate`: Supported sample rates (16000, 44100, or 48000 Hz)
-- `RecordingEncodingType`: Encoding type for recording ('pcm_32bit', 'pcm_16bit', or 'pcm_8bit')
-
-- `AudioEvents`: Enumeration of event names emitted by the module.
-- `DeviceReconnectedReason`: Enumeration of reasons for device reconnection events.
-- `DeviceReconnectedEventPayload`: Payload type for device reconnection events.
-- `SuspendSoundEventTurnId`: Constant turn ID that suppresses sound events for a specific playback.
-
-- `IAudioBufferConfig`: Configuration for the jitter buffer (sizes, thresholds, timing).
-- `IAudioPlayPayload`: Structured payload used when enqueuing buffered audio frames.
-- `IAudioFrame`: Individual audio frame representation used by buffering internals.
-- `BufferHealthState`: Health state classification for the jitter buffer.
-- `IBufferHealthMetrics`: Health metrics snapshot of the buffer (levels, underruns, etc.).
-- `IAudioBufferManager`: Interface for buffer manager implementations.
-- `BufferedStreamConfig`: Configuration for starting buffered audio streams.
-- `SmartBufferConfig`: Configuration for adaptive buffer behavior.
-- `SmartBufferMode`: Modes for adaptive buffering strategies.
-- `NetworkConditions`: Network conditions used to guide adaptive buffering.
-
-Advanced exports (for low-level/advanced usage):
-
-- `AudioBufferManager`, `SmartBufferManager`: Buffer manager implementations.
-- `FrameProcessor`, `QualityMonitor`: Processing and quality monitoring utilities.
-
-All methods are static and most return Promises that resolve when the operation is complete. Error handling is built into each method, with descriptive error messages if operations fail.
-
-## Swift Implementation 🍎
-
-The Swift implementation of the Expo Audio Stream module uses the `AVFoundation` framework to handle audio playback. It utilizes a dual-buffer queue system to ensure smooth and uninterrupted audio streaming. The module also configures the audio session and manages the audio engine and player node.
-
-## Kotlin Implementation 🤖
-
-The Kotlin implementation of the Expo Audio Stream module uses the `AudioTrack` class from the Android framework to handle audio playback. It uses a concurrent queue to manage the audio chunks and a coroutine-based playback loop to ensure efficient and asynchronous processing of the audio data.
-
-## Voice Processing and Isolation 🎤
-
-The module implements several audio optimizations for voice recording:
-
-- On iOS 15 and later, users are prompted with system voice isolation options (`microphoneModes`), allowing them to choose their preferred voice isolation level.
-- When simultaneous recording and playback is enabled, the module uses iOS voice processing which includes:
-  - Noise reduction
-  - Echo cancellation
-  - Voice optimization
-
-Note: Voice processing may result in lower audio levels as it optimizes for voice clarity over volume. This is a trade-off made to ensure better voice quality and reduce background noise.
-
-## Limitations and Considerations ⚠️
-
-- The Expo Play Audio Stream module is designed to work with specific audio formats (RIFF, 16 kHz, 16-bit, mono PCM). If your audio data is in a different format, you may need to convert it before using the module.
-- The module does not provide advanced features like audio effects or mixing. It is primarily focused on real-time audio streaming and recording.
-- The performance of the module may depend on the device's hardware capabilities and the complexity of the audio data being streamed.
-
-## Contributions 🤝
-
-Contributions to the Expo Audio Stream module are welcome! If you encounter any issues or have ideas for improvements, feel free to open an issue or submit a pull request on the [GitHub repository](https://github.com/expo/expo-audio-stream).
-
-## License 📄
-
-The Expo Play Audio Stream module is licensed under the [MIT License](LICENSE).
+MIT

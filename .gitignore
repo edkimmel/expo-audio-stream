@@ -61,3 +61,4 @@ yarn-error.log
 /example/android/*
 example/ios/expoaudiostreamexample.xcodeproj/project.pbxproj
 .cursor/
+.claude/
