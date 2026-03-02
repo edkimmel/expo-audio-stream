@@ -1,6 +1,6 @@
 {
   "name": "@edkimmel/expo-audio-stream",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Expo Play Audio Stream module",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -41,5 +41,8 @@
     "react": "*",
     "react-native": "*"
   },
-  "packageManager": "yarn@4.1.1"
+  "packageManager": "yarn@4.1.1",
+  "publishConfig": {
+    "access": "public"
+  }
 }
