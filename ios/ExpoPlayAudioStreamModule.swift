@@ -8,10 +8,11 @@ let soundIsStartedEvent: String = "SoundStarted"
 let deviceReconnectedEvent: String = "DeviceReconnected"
 
 
-public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, MicrophoneDataDelegate, SoundPlayerDelegate {
+public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, MicrophoneDataDelegate, SoundPlayerDelegate, PipelineEventSender {
     private var _audioSessionManager: AudioSessionManager?
     private var _microphone: Microphone?
     private var _soundPlayer: SoundPlayer?
+    private var _pipelineIntegration: PipelineIntegration?
     
     private var audioSessionManager: AudioSessionManager {
         if _audioSessionManager == nil {
@@ -37,16 +38,42 @@ public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, Micr
         return _soundPlayer!
     }
     
+    private var pipelineIntegration: PipelineIntegration {
+        if _pipelineIntegration == nil {
+            _pipelineIntegration = PipelineIntegration(eventSender: self)
+        }
+        return _pipelineIntegration!
+    }
+
     private var isAudioSessionInitialized: Bool = false
+
+    // ── PipelineEventSender conformance ───────────────────────────────
+    func sendPipelineEvent(_ eventName: String, _ params: [String: Any]) {
+        sendEvent(eventName, params)
+    }
 
     public func definition() -> ModuleDefinition {
         Name("ExpoPlayAudioStream")
-        
+
         // Defines event names that the module can send to JavaScript.
-        Events([audioDataEvent, soundIsPlayedEvent, soundIsStartedEvent, deviceReconnectedEvent])
-        
+        Events([
+            audioDataEvent,
+            soundIsPlayedEvent,
+            soundIsStartedEvent,
+            deviceReconnectedEvent,
+            PipelineIntegration.EVENT_STATE_CHANGED,
+            PipelineIntegration.EVENT_PLAYBACK_STARTED,
+            PipelineIntegration.EVENT_ERROR,
+            PipelineIntegration.EVENT_ZOMBIE_DETECTED,
+            PipelineIntegration.EVENT_UNDERRUN,
+            PipelineIntegration.EVENT_DRAINED,
+            PipelineIntegration.EVENT_AUDIO_FOCUS_LOST,
+            PipelineIntegration.EVENT_AUDIO_FOCUS_RESUMED,
+        ])
+
         Function("destroy") {
-            // Now we can properly reset all instances
+            self._pipelineIntegration?.destroy()
+            self._pipelineIntegration = nil
             self._audioSessionManager = nil
             self._microphone = nil
             self._soundPlayer = nil
@@ -385,6 +412,52 @@ public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, Micr
         /// Clears all audio files stored in the document directory.
         Function("clearAudioFiles") {
             clearAudioFiles()
+        }
+
+        // ── Pipeline functions ────────────────────────────────────────────
+
+        AsyncFunction("connectPipeline") { (options: [String: Any], promise: Promise) in
+            do {
+                let result = try self.pipelineIntegration.connect(options: options)
+                promise.resolve(result)
+            } catch {
+                promise.reject("PIPELINE_CONNECT_ERROR", error.localizedDescription)
+            }
+        }
+
+        AsyncFunction("pushPipelineAudio") { (options: [String: Any], promise: Promise) in
+            do {
+                try self.pipelineIntegration.pushAudio(options: options)
+                promise.resolve(nil)
+            } catch {
+                promise.reject("PIPELINE_PUSH_ERROR", error.localizedDescription)
+            }
+        }
+
+        Function("pushPipelineAudioSync") { (options: [String: Any]) -> Bool in
+            return self.pipelineIntegration.pushAudioSync(options: options)
+        }
+
+        AsyncFunction("disconnectPipeline") { (promise: Promise) in
+            self.pipelineIntegration.disconnect()
+            promise.resolve(nil)
+        }
+
+        AsyncFunction("invalidatePipelineTurn") { (options: [String: Any], promise: Promise) in
+            do {
+                try self.pipelineIntegration.invalidateTurn(options: options)
+                promise.resolve(nil)
+            } catch {
+                promise.reject("PIPELINE_INVALIDATE_ERROR", error.localizedDescription)
+            }
+        }
+
+        Function("getPipelineTelemetry") { () -> [String: Any] in
+            return self.pipelineIntegration.getTelemetry()
+        }
+
+        Function("getPipelineState") { () -> String in
+            return self.pipelineIntegration.getState()
         }
     }
     
