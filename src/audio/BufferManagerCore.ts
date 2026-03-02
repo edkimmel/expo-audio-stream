@@ -13,12 +13,12 @@ import {
 export class AudioBufferManager
   implements IAudioBufferManager
 {
-  private static readonly _sampleRate = 16000;
   private static readonly _bytesPerSample = 2;
   private static readonly _bufferCheckIntervalMs = 50;
 
   private _buffer: IAudioFrame[] = [];
   private _config: IAudioBufferConfig;
+  private _sampleRate: number;
   private _frameProcessor: FrameProcessor | null;
   private _qualityMonitor: QualityMonitor | null;
   private _playbackTimer: any = null;
@@ -28,7 +28,7 @@ export class AudioBufferManager
   private _currentTurnId: string | null = null;
   private _encoding: Encoding = EncodingTypes.PCM_S16LE;
 
-  constructor(config?: Partial<IAudioBufferConfig>) {
+  constructor(config?: Partial<IAudioBufferConfig>, sampleRate: number = 16000) {
     this._config = {
       targetBufferMs: 240,
       minBufferMs: 120,
@@ -37,8 +37,10 @@ export class AudioBufferManager
       ...config,
     };
 
+    this._sampleRate = sampleRate;
     this._frameProcessor = new FrameProcessor(
-      this._config.frameIntervalMs
+      this._config.frameIntervalMs,
+      sampleRate
     );
     this._qualityMonitor = new QualityMonitor(
       this._config.frameIntervalMs
@@ -296,7 +298,7 @@ export class AudioBufferManager
   private _insertSilenceFrame(): void {
     const samplesNeeded = Math.floor(
       (this._config.frameIntervalMs *
-        AudioBufferManager._sampleRate) /
+        this._sampleRate) /
         1000
     );
     const bytesNeeded =

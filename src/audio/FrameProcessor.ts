@@ -9,7 +9,6 @@ import {
  * Validates input, sanitizes data, estimates duration.
  */
 export class FrameProcessor implements IFrameProcessor {
-  private static readonly _sampleRate = 16000; // 16kHz
   private static readonly _bytesPerSample = 2; // 16-bit PCM
   private static readonly _maxReasonableChunkSizeBytes =
     64 * 1024; // 64KB safety
@@ -18,9 +17,11 @@ export class FrameProcessor implements IFrameProcessor {
 
   private _sequenceNumber: number = 0;
   private _frameIntervalMs: number;
+  private _sampleRate: number;
 
-  constructor(frameIntervalMs: number = 20) {
+  constructor(frameIntervalMs: number = 20, sampleRate: number = 16000) {
     this._frameIntervalMs = frameIntervalMs;
+    this._sampleRate = sampleRate;
   }
 
   /** Parse an audio payload into timestamped frames with validation. */
@@ -140,7 +141,7 @@ export class FrameProcessor implements IFrameProcessor {
       const sampleCount =
         estimatedBytes / FrameProcessor._bytesPerSample;
       const durationMs =
-        (sampleCount / FrameProcessor._sampleRate) * 1000;
+        (sampleCount / this._sampleRate) * 1000;
 
       // Sanity check and fallback to frame interval
       if (durationMs <= 0 || durationMs > 1000) {
