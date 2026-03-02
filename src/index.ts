@@ -669,3 +669,25 @@ export {
   QualityMonitor,
   SmartBufferManager,
 } from "./audio";
+
+// Export native audio pipeline V3
+export { Pipeline } from "./pipeline";
+export type {
+  ConnectPipelineOptions,
+  ConnectPipelineResult,
+  PushPipelineAudioOptions,
+  InvalidatePipelineTurnOptions,
+  PipelineState,
+  PipelineEventMap,
+  PipelineEventName,
+  PipelineBufferTelemetry,
+  PipelineTelemetry,
+  PipelineStateChangedEvent,
+  PipelinePlaybackStartedEvent,
+  PipelineErrorEvent,
+  PipelineZombieDetectedEvent,
+  PipelineUnderrunEvent,
+  PipelineDrainedEvent,
+  PipelineAudioFocusLostEvent,
+  PipelineAudioFocusResumedEvent,
+} from "./pipeline";

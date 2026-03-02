@@ -1,0 +1,610 @@
+package expo.modules.audiostream.pipeline
+
+import android.content.ContentResolver
+import android.content.Context
+import android.database.ContentObserver
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.util.Base64
+import android.util.Log
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+
+// ────────────────────────────────────────────────────────────────────────────
+// Public contracts
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Pipeline states reported to JS via [PipelineListener.onStateChanged]. */
+enum class PipelineState(val value: String) {
+    IDLE("idle"),
+    CONNECTING("connecting"),
+    STREAMING("streaming"),
+    DRAINING("draining"),
+    ERROR("error");
+
+    companion object {
+        fun fromValue(value: String): PipelineState =
+            entries.firstOrNull { it.value == value } ?: IDLE
+    }
+}
+
+/** Listener interface — implemented by [PipelineIntegration] to bridge events to JS. */
+interface PipelineListener {
+    fun onStateChanged(state: PipelineState)
+    fun onPlaybackStarted(turnId: String)
+    fun onError(code: String, message: String)
+    fun onZombieDetected(playbackHead: Long, stalledMs: Long)
+    fun onUnderrun(count: Int)
+    fun onDrained(turnId: String)
+    fun onAudioFocusLost()
+    fun onAudioFocusResumed()
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// AudioPipeline
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Core orchestrator for the native audio pipeline.
+ *
+ * Creates an [AudioTrack] whose buffer size is derived from the device HAL's
+ * `getMinBufferSize` (never hardcoded), a [JitterBuffer] ring, and a
+ * **MAX_PRIORITY write thread** that loops `buffer.read() → track.write(BLOCKING)`.
+ *
+ * Key design points:
+ *   - AudioTrack uses **USAGE_MEDIA + CONTENT_TYPE_SPEECH** (not
+ *     VOICE_COMMUNICATION — avoids earpiece routing).
+ *   - AudioTrack stays alive for the entire session, writing silence when idle.
+ *     This avoids 50–100 ms restart latency.
+ *   - Config is **immutable per session** — tear down and rebuild to change
+ *     sample rate.
+ *   - [turnLock] synchronizes [pushAudio] and [invalidateTurn] to prevent
+ *     interleaved buffer.reset + buffer.write.
+ *   - [disconnect] calls `track.stop()` to unblock WRITE_BLOCKING before
+ *     joining the write thread, preventing the race where cleanup releases a
+ *     track the write thread still holds.
+ *   - [setState] dispatches listener callbacks to the main thread when called
+ *     from the bridge thread.
+ *   - Underrun events are debounced (fire once per new underrun, not per
+ *     silence frame).
+ */
+class AudioPipeline(
+    private val context: Context,
+    private val sampleRate: Int,
+    private val channelCount: Int,
+    private val targetBufferMs: Int,
+    private val listener: PipelineListener
+) {
+    companion object {
+        private const val TAG = "AudioPipeline"
+
+        /** Track buffer = 4× frame size for scheduling headroom. */
+        private const val TRACK_BUFFER_MULTIPLIER = 4
+
+        /** How often (ms) the zombie-detection daemon checks playbackHeadPosition. */
+        private const val ZOMBIE_POLL_INTERVAL_MS = 2000L
+
+        /** If playback head hasn't moved for this long, declare zombie. */
+        private const val ZOMBIE_STALL_THRESHOLD_MS = 5000L
+
+        /** Minimum volume level (0–15) enforced by VolumeGuard on STREAM_MUSIC. */
+        private const val MIN_VOLUME_LEVEL = 1
+    }
+
+    // ── Derived audio constants ─────────────────────────────────────────
+    private val channelMask =
+        if (channelCount == 1) AudioFormat.CHANNEL_OUT_MONO
+        else AudioFormat.CHANNEL_OUT_STEREO
+
+    /** Minimum buffer size in bytes reported by the device HAL. */
+    private val minBufferBytes = AudioTrack.getMinBufferSize(
+        sampleRate,
+        channelMask,
+        AudioFormat.ENCODING_PCM_16BIT
+    )
+
+    /** Number of 16-bit samples per "frame" (one HAL buffer). */
+    val frameSizeSamples: Int = minBufferBytes / 2   // 2 bytes per short
+
+    /** Track buffer in bytes — 4× frame for scheduling headroom. */
+    private val trackBufferBytes = minBufferBytes * TRACK_BUFFER_MULTIPLIER
+
+    // ── Core components ─────────────────────────────────────────────────
+    private var audioTrack: AudioTrack? = null
+    private var jitterBuffer: JitterBuffer? = null
+
+    // ── Threading ───────────────────────────────────────────────────────
+    private var writeThread: Thread? = null
+    private val running = AtomicBoolean(false)
+
+    // ── Turn management ─────────────────────────────────────────────────
+    private val turnLock = ReentrantLock()
+    @Volatile private var currentTurnId: String? = null
+    @Volatile private var isFirstChunkOfTurn = true
+    @Volatile private var playbackStartedForTurn = false
+
+    // ── Audio focus ─────────────────────────────────────────────────────
+    private val audioManager: AudioManager =
+        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val hasAudioFocus = AtomicBoolean(false)
+    private val audioFocusLost = AtomicBoolean(false)
+
+    private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                Log.d(TAG, "Audio focus gained")
+                audioFocusLost.set(false)
+                hasAudioFocus.set(true)
+                listener.onAudioFocusResumed()
+            }
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                Log.d(TAG, "Audio focus lost: $focusChange")
+                audioFocusLost.set(true)
+                // Don't release focus — keep writing silence so track stays alive
+                listener.onAudioFocusLost()
+            }
+        }
+    }
+
+    // ── Zombie detection ────────────────────────────────────────────────
+    private var zombieThread: Thread? = null
+    private var lastPlaybackHead: Long = 0
+    private var lastHeadChangeTime: Long = System.currentTimeMillis()
+
+    // ── VolumeGuard ─────────────────────────────────────────────────────
+    private var volumeObserver: ContentObserver? = null
+
+    // ── Underrun debounce ───────────────────────────────────────────────
+    private var lastReportedUnderrunCount = 0
+
+    // ── State ───────────────────────────────────────────────────────────
+    @Volatile private var state: PipelineState = PipelineState.IDLE
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // ── Telemetry (atomics — safe to read from any thread) ──────────────
+    val totalPushCalls = AtomicLong(0)
+    val totalPushBytes = AtomicLong(0)
+    val totalWriteLoops = AtomicLong(0)
+
+    // ════════════════════════════════════════════════════════════════════
+    // Connect / Disconnect
+    // ════════════════════════════════════════════════════════════════════
+
+    /**
+     * Build the AudioTrack, JitterBuffer, start the write thread, request
+     * audio focus, and install VolumeGuard + zombie detection.
+     */
+    fun connect() {
+        if (running.get()) {
+            Log.w(TAG, "connect() called while already running — ignoring")
+            return
+        }
+        setState(PipelineState.CONNECTING)
+
+        try {
+            // ── 1. JitterBuffer ─────────────────────────────────────────
+            // Ring capacity: enough for ~2 s of audio + headroom
+            val ringCapacity = sampleRate * channelCount * 2
+            jitterBuffer = JitterBuffer(
+                sampleRate = sampleRate,
+                channels = channelCount,
+                targetBufferMs = targetBufferMs,
+                capacitySamples = ringCapacity
+            )
+
+            // ── 2. AudioTrack ───────────────────────────────────────────
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+
+            val audioFormat = AudioFormat.Builder()
+                .setSampleRate(sampleRate)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(channelMask)
+                .build()
+
+            audioTrack = AudioTrack.Builder()
+                .setAudioAttributes(audioAttributes)
+                .setAudioFormat(audioFormat)
+                .setBufferSizeInBytes(trackBufferBytes)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+
+            audioTrack!!.play()
+
+            // ── 3. Audio focus ──────────────────────────────────────────
+            requestAudioFocus()
+
+            // ── 4. Write thread ─────────────────────────────────────────
+            running.set(true)
+            writeThread = Thread(::writeLoop, "AudioPipeline-Writer").apply {
+                priority = Thread.MAX_PRIORITY
+                isDaemon = false
+                start()
+            }
+
+            // ── 5. Zombie detection daemon ──────────────────────────────
+            startZombieDetection()
+
+            // ── 6. VolumeGuard ──────────────────────────────────────────
+            installVolumeGuard()
+
+            // ── 7. Reset telemetry ──────────────────────────────────────
+            resetTelemetry()
+
+            setState(PipelineState.IDLE)
+            Log.d(TAG, "Connected — sampleRate=$sampleRate ch=$channelCount " +
+                    "frameSamples=$frameSizeSamples targetBuffer=${targetBufferMs}ms")
+        } catch (e: Exception) {
+            Log.e(TAG, "connect() failed", e)
+            setState(PipelineState.ERROR)
+            listener.onError("CONNECT_FAILED", e.message ?: "Unknown error")
+            disconnect()
+        }
+    }
+
+    /**
+     * Tear down the pipeline.
+     *
+     * Calls `track.stop()` **first** to unblock the write thread's
+     * `WRITE_BLOCKING` call, then joins the thread.
+     */
+    fun disconnect() {
+        running.set(false)
+
+        // Stop zombie detection
+        zombieThread?.interrupt()
+        zombieThread = null
+
+        // Remove VolumeGuard
+        removeVolumeGuard()
+
+        // Abandon audio focus
+        abandonAudioFocus()
+
+        // Stop AudioTrack to unblock WRITE_BLOCKING
+        try {
+            audioTrack?.stop()
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "AudioTrack.stop() failed — may already be stopped", e)
+        }
+
+        // Join write thread (now unblocked)
+        writeThread?.let { thread ->
+            try {
+                thread.join(2000)
+                if (thread.isAlive) {
+                    Log.w(TAG, "Write thread did not exit in time — interrupting")
+                    thread.interrupt()
+                    thread.join(1000)
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+        writeThread = null
+
+        // Release AudioTrack
+        try {
+            audioTrack?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "AudioTrack.release() failed", e)
+        }
+        audioTrack = null
+
+        jitterBuffer = null
+        currentTurnId = null
+
+        setState(PipelineState.IDLE)
+        Log.d(TAG, "Disconnected")
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Push audio (bridge thread → jitter buffer)
+    // ════════════════════════════════════════════════════════════════════
+
+    /**
+     * Decode a base64-encoded PCM16 chunk and write it into the jitter buffer.
+     *
+     * @param base64Audio Base64-encoded PCM 16-bit LE audio data.
+     * @param turnId      Conversation turn identifier.
+     * @param isFirstChunk True if this is the first chunk of a new turn.
+     * @param isLastChunk  True if this is the final chunk of the current turn.
+     */
+    fun pushAudio(base64Audio: String, turnId: String, isFirstChunk: Boolean, isLastChunk: Boolean) {
+        val buf = jitterBuffer ?: run {
+            listener.onError("NOT_CONNECTED", "Pipeline not connected")
+            return
+        }
+
+        turnLock.withLock {
+            // ── Turn boundary handling ──────────────────────────────────
+            if (isFirstChunk || currentTurnId != turnId) {
+                buf.reset()
+                currentTurnId = turnId
+                this.isFirstChunkOfTurn = true
+                playbackStartedForTurn = false
+                lastReportedUnderrunCount = 0
+                setState(PipelineState.STREAMING)
+            }
+
+            // ── Decode base64 → PCM shorts ──────────────────────────────
+            val bytes: ByteArray = try {
+                Base64.decode(base64Audio, Base64.DEFAULT)
+            } catch (e: Exception) {
+                listener.onError("DECODE_ERROR", "Base64 decode failed: ${e.message}")
+                return
+            }
+
+            val shortBuffer = ByteBuffer.wrap(bytes)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .asShortBuffer()
+            val samples = ShortArray(shortBuffer.remaining())
+            shortBuffer.get(samples)
+
+            // ── Write into jitter buffer ────────────────────────────────
+            buf.write(samples)
+
+            // ── Telemetry ───────────────────────────────────────────────
+            totalPushCalls.incrementAndGet()
+            totalPushBytes.addAndGet(bytes.size.toLong())
+
+            // ── End-of-stream ───────────────────────────────────────────
+            if (isLastChunk) {
+                buf.markEndOfStream()
+                setState(PipelineState.DRAINING)
+            }
+        }
+    }
+
+    /**
+     * Invalidate the current turn. Resets the jitter buffer so stale audio
+     * is discarded immediately. Safe to call from any thread.
+     */
+    fun invalidateTurn(newTurnId: String) {
+        turnLock.withLock {
+            jitterBuffer?.reset()
+            currentTurnId = newTurnId
+            isFirstChunkOfTurn = true
+            playbackStartedForTurn = false
+            lastReportedUnderrunCount = 0
+            setState(PipelineState.IDLE)
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // State & Telemetry
+    // ════════════════════════════════════════════════════════════════════
+
+    fun getState(): PipelineState = state
+
+    fun getTelemetry(): Bundle {
+        val buf = jitterBuffer
+        val bundle = Bundle().apply {
+            putString("state", state.value)
+            putInt("bufferMs", buf?.bufferedMs() ?: 0)
+            putInt("bufferSamples", buf?.availableSamples() ?: 0)
+            putBoolean("primed", buf?.isPrimed() ?: false)
+            putLong("totalWritten", buf?.totalWritten?.get() ?: 0)
+            putLong("totalRead", buf?.totalRead?.get() ?: 0)
+            putInt("underrunCount", buf?.underrunCount?.get() ?: 0)
+            putInt("peakLevel", buf?.peakLevel?.get() ?: 0)
+            putLong("totalPushCalls", totalPushCalls.get())
+            putLong("totalPushBytes", totalPushBytes.get())
+            putLong("totalWriteLoops", totalWriteLoops.get())
+            putString("turnId", currentTurnId ?: "")
+        }
+        return bundle
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Write loop (runs on MAX_PRIORITY thread)
+    // ════════════════════════════════════════════════════════════════════
+
+    private fun writeLoop() {
+        Log.d(TAG, "Write thread started")
+        val frame = ShortArray(frameSizeSamples)
+
+        while (running.get()) {
+            val track = audioTrack ?: break
+            val buf = jitterBuffer ?: break
+
+            // Read from jitter buffer (silence if not primed or underrun)
+            buf.read(frame)
+
+            // If audio focus is lost, overwrite with silence
+            if (audioFocusLost.get()) {
+                frame.fill(0)
+            }
+
+            // Write to AudioTrack (BLOCKING — will park thread until space available)
+            try {
+                val written = track.write(frame, 0, frame.size, AudioTrack.WRITE_BLOCKING)
+
+                if (written < 0) {
+                    Log.e(TAG, "AudioTrack.write returned error: $written")
+                    setState(PipelineState.ERROR)
+                    listener.onError("WRITE_ERROR", "AudioTrack.write returned $written")
+                    break
+                }
+            } catch (e: IllegalStateException) {
+                // Track was stopped/released — expected during disconnect
+                if (running.get()) {
+                    Log.e(TAG, "AudioTrack.write threw in running state", e)
+                    setState(PipelineState.ERROR)
+                    listener.onError("WRITE_ERROR", e.message ?: "AudioTrack write error")
+                }
+                break
+            }
+
+            totalWriteLoops.incrementAndGet()
+
+            // ── Playback-started event (once per turn) ──────────────────
+            if (!playbackStartedForTurn && buf.isPrimed() && currentTurnId != null) {
+                playbackStartedForTurn = true
+                listener.onPlaybackStarted(currentTurnId!!)
+            }
+
+            // ── Underrun debounce ───────────────────────────────────────
+            val currentUnderruns = buf.underrunCount.get()
+            if (currentUnderruns > lastReportedUnderrunCount) {
+                lastReportedUnderrunCount = currentUnderruns
+                listener.onUnderrun(currentUnderruns)
+            }
+
+            // ── Drain detection ─────────────────────────────────────────
+            if (buf.isDrained() && state == PipelineState.DRAINING) {
+                currentTurnId?.let { listener.onDrained(it) }
+                setState(PipelineState.IDLE)
+            }
+        }
+
+        Log.d(TAG, "Write thread exiting")
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Audio focus
+    // ════════════════════════════════════════════════════════════════════
+
+    private fun requestAudioFocus() {
+        val result = audioManager.requestAudioFocus(
+            focusChangeListener,
+            AudioManager.STREAM_MUSIC,
+            AudioManager.AUDIOFOCUS_GAIN
+        )
+        hasAudioFocus.set(result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        if (!hasAudioFocus.get()) {
+            Log.w(TAG, "Audio focus request denied")
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        audioManager.abandonAudioFocus(focusChangeListener)
+        hasAudioFocus.set(false)
+        audioFocusLost.set(false)
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Zombie AudioTrack detection
+    // ════════════════════════════════════════════════════════════════════
+
+    private fun startZombieDetection() {
+        lastPlaybackHead = audioTrack?.playbackHeadPosition?.toLong() ?: 0
+        lastHeadChangeTime = System.currentTimeMillis()
+
+        zombieThread = Thread({
+            while (running.get() && !Thread.currentThread().isInterrupted) {
+                try {
+                    Thread.sleep(ZOMBIE_POLL_INTERVAL_MS)
+                } catch (_: InterruptedException) {
+                    break
+                }
+
+                val track = audioTrack ?: break
+                val head = track.playbackHeadPosition.toLong()
+                val now = System.currentTimeMillis()
+
+                if (head != lastPlaybackHead) {
+                    lastPlaybackHead = head
+                    lastHeadChangeTime = now
+                } else {
+                    val stalledMs = now - lastHeadChangeTime
+                    // Only flag zombie if we think we're actively streaming
+                    if (stalledMs >= ZOMBIE_STALL_THRESHOLD_MS &&
+                        (state == PipelineState.STREAMING || state == PipelineState.DRAINING)
+                    ) {
+                        Log.w(TAG, "Zombie AudioTrack detected! head=$head stalledMs=$stalledMs")
+                        listener.onZombieDetected(head, stalledMs)
+                        // Reset the timer so we don't spam
+                        lastHeadChangeTime = now
+                    }
+                }
+            }
+        }, "AudioPipeline-Zombie").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // VolumeGuard
+    // ════════════════════════════════════════════════════════════════════
+
+    private fun installVolumeGuard() {
+        volumeObserver = object : ContentObserver(mainHandler) {
+            override fun onChange(selfChange: Boolean) {
+                val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                if (current < MIN_VOLUME_LEVEL) {
+                    Log.d(TAG, "VolumeGuard: raising STREAM_MUSIC from $current to $MIN_VOLUME_LEVEL")
+                    try {
+                        audioManager.setStreamVolume(
+                            AudioManager.STREAM_MUSIC,
+                            MIN_VOLUME_LEVEL,
+                            0 // no flags — silent raise
+                        )
+                    } catch (e: SecurityException) {
+                        Log.w(TAG, "VolumeGuard: setStreamVolume denied", e)
+                    }
+                }
+            }
+        }
+
+        try {
+            context.contentResolver.registerContentObserver(
+                Settings.System.CONTENT_URI,
+                true,
+                volumeObserver!!
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "VolumeGuard: failed to register ContentObserver", e)
+            volumeObserver = null
+        }
+    }
+
+    private fun removeVolumeGuard() {
+        volumeObserver?.let {
+            try {
+                context.contentResolver.unregisterContentObserver(it)
+            } catch (e: Exception) {
+                Log.w(TAG, "VolumeGuard: failed to unregister", e)
+            }
+        }
+        volumeObserver = null
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Internal helpers
+    // ════════════════════════════════════════════════════════════════════
+
+    private fun setState(newState: PipelineState) {
+        if (state == newState) return
+        state = newState
+        // Dispatch to main thread if called from bridge/write thread
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            listener.onStateChanged(newState)
+        } else {
+            mainHandler.post { listener.onStateChanged(newState) }
+        }
+    }
+
+    private fun resetTelemetry() {
+        totalPushCalls.set(0)
+        totalPushBytes.set(0)
+        totalWriteLoops.set(0)
+        jitterBuffer?.resetTelemetry()
+    }
+}
