@@ -6,12 +6,10 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.os.bundleOf
 import expo.modules.kotlin.Promise
-import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 
@@ -22,7 +20,8 @@ class AudioRecorderManager(
     private val audioEffectsManager: AudioEffectsManager
 ) {
     private var audioRecord: AudioRecord? = null
-    private var bufferSizeInBytes = 1024
+    private var bufferSizeInBytes = 0   // AudioRecord internal ring buffer (>= getMinBufferSize)
+    private var readSizeInBytes = 0     // Bytes to read per call (exactly one interval of audio)
     private var isRecording = AtomicBoolean(false)
     private val isPaused = AtomicBoolean(false)
     private var streamUuid: String? = null
@@ -30,8 +29,6 @@ class AudioRecorderManager(
     private var recordingStartTime: Long = 0
     private var totalRecordedTime: Long = 0
     private var totalDataSize = 0
-    private var interval = 100L  // Emit data every 100 milliseconds (0.1 second)
-    private var lastEmitTime = SystemClock.elapsedRealtime()
     private var lastPauseTime = 0L
     private var pausedDuration = 0L
     private var lastEmittedSize = 0L
@@ -122,6 +119,27 @@ class AudioRecorderManager(
         audioFormat = formatValidationResult.first
         recordingConfig = formatValidationResult.second
 
+        // Compute how many bytes correspond to the requested interval.
+        val bytesPerSample = when (recordingConfig.encoding) {
+            "pcm_8bit" -> 1
+            "pcm_32bit" -> 4
+            else -> 2
+        }
+        val intervalBytes = (recordingConfig.interval * recordingConfig.sampleRate *
+                recordingConfig.channels * bytesPerSample / 1000).toInt()
+
+        // readSizeInBytes = exactly one interval of audio; this is what we request
+        // per read() call, giving us the cadence the caller asked for.
+        readSizeInBytes = intervalBytes
+
+        // AudioRecord's internal ring buffer must be >= getMinBufferSize.
+        // Make it large enough to hold at least one full read, too.
+        val channelConfig = if (recordingConfig.channels == 1) AudioFormat.CHANNEL_IN_MONO
+            else AudioFormat.CHANNEL_IN_STEREO
+        val minBuf = AudioRecord.getMinBufferSize(recordingConfig.sampleRate, channelConfig, audioFormat)
+        bufferSizeInBytes = maxOf(intervalBytes, minBuf)
+        Log.d(Constants.TAG, "Interval: ${recordingConfig.interval}ms, readSize: $readSizeInBytes, ringBuffer: $bufferSizeInBytes (minBuf=$minBuf)")
+
         // Initialize the AudioRecord if it's a new recording or if it's not currently paused
         if (audioRecord == null || !isPaused.get()) {
             Log.d(Constants.TAG, "AudioFormat: $audioFormat, BufferSize: $bufferSizeInBytes")
@@ -201,7 +219,6 @@ class AudioRecorderManager(
             pausedDuration = 0
             totalDataSize = 0
             streamUuid = null
-            lastEmitTime = SystemClock.elapsedRealtime()
             lastEmittedSize = 0
 
             Log.d(Constants.TAG, "Audio resources cleaned up")
@@ -316,45 +333,33 @@ class AudioRecorderManager(
     }
 
     private fun recordingProcess() {
-        Log.i(Constants.TAG, "Starting recording process...")
-        val accumulatedAudioData = ByteArrayOutputStream()
-        val audioData = ByteArray(bufferSizeInBytes)
-        Log.d(Constants.TAG, "Entering recording loop")
+        Log.i(Constants.TAG, "Starting recording process, readSize=$readSizeInBytes, ringBuffer=$bufferSizeInBytes")
+        val audioData = ByteArray(readSizeInBytes)
         while (isRecording.get() && !Thread.currentThread().isInterrupted) {
             if (isPaused.get()) {
-                // If recording is paused, skip reading from the microphone
+                Thread.sleep(10)
                 continue
             }
 
             val bytesRead = synchronized(audioRecordLock) {
-                // Only synchronize the read operation and the check
                 audioRecord?.let {
                     if (it.state != AudioRecord.STATE_INITIALIZED) {
                         Log.e(Constants.TAG, "AudioRecord not initialized")
                         return@let -1
                     }
-                    it.read(audioData, 0, bufferSizeInBytes).also { bytes ->
+                    // Read exactly one interval's worth of audio.
+                    // AudioRecord.read() blocks until readSizeInBytes are available.
+                    it.read(audioData, 0, readSizeInBytes).also { bytes ->
                         if (bytes < 0) {
                             Log.e(Constants.TAG, "AudioRecord read error: $bytes")
                         }
                     }
-                } ?: -1 // Handle null case
+                } ?: -1
             }
             if (bytesRead > 0) {
                 totalDataSize += bytesRead
-                accumulatedAudioData.write(audioData, 0, bytesRead)
-
-                // Emit audio data at defined intervals
-                if (SystemClock.elapsedRealtime() - lastEmitTime >= interval) {
-                    emitAudioData(
-                        accumulatedAudioData.toByteArray(),
-                        accumulatedAudioData.size()
-                    )
-                    lastEmitTime = SystemClock.elapsedRealtime() // Reset the timer
-                    accumulatedAudioData.reset() // Clear the accumulator
-                }
-
-                Log.d(Constants.TAG, "Bytes read: $bytesRead")
+                // Emit immediately — each read is one interval of audio
+                emitAudioData(audioData, bytesRead)
             }
         }
     }
