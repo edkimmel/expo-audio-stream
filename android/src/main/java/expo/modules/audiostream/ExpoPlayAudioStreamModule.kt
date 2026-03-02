@@ -314,9 +314,8 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         val audioEffectsManager = AudioEffectsManager()
         audioRecorderManager =
             AudioRecorderManager(
-                androidContext.filesDir,
-                permissionUtils, 
-                audioEncoder, 
+                permissionUtils,
+                audioEncoder,
                 this,
                 audioEffectsManager
             )

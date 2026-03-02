@@ -424,26 +424,24 @@ public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, Micr
     ///   - recordingTime: The current recording time.
     ///   - totalDataSize: The total size of the received audio data.
     func audioStreamManager(_ manager: AudioSessionManager, didReceiveAudioData data: Data, recordingTime: TimeInterval, totalDataSize: Int64) {
-        guard let fileURL = manager.recordingFileURL,
-              let settings = manager.recordingSettings else { return }
-        
+        guard let settings = manager.recordingSettings else { return }
+
         let encodedData = data.base64EncodedString()
-        
-        // Assuming `lastEmittedSize` and `streamUuid` are tracked within `AudioStreamManager`
-        let deltaSize = data.count  // This needs to be calculated based on what was last sent if using chunks
-        let fileSize = totalDataSize  // Total data size in bytes
-        
+
+        let deltaSize = data.count
+        let fileSize = totalDataSize
+
         // Calculate the position in milliseconds using the lastEmittedSize
         let sampleRate = settings.sampleRate
         let channels = Double(settings.numberOfChannels)
         let bitDepth = Double(settings.bitDepth)
         let position = Int((Double(manager.lastEmittedSize) / (sampleRate * channels * (bitDepth / 8))) * 1000)
-        
-        // Construct the event payload similar to Android
+
+        // Construct the event payload
         let eventBody: [String: Any] = [
-            "fileUri": fileURL.absoluteString,
-            "lastEmittedSize": manager.lastEmittedSize,  // Needs to be maintained within AudioStreamManager
-            "position": position, // Add position of the chunk in ms since
+            "fileUri": "",
+            "lastEmittedSize": manager.lastEmittedSize,
+            "position": position,
             "encoded": encodedData,
             "deltaSize": deltaSize,
             "totalSize": fileSize,
@@ -474,40 +472,12 @@ public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, Micr
         }
     }
     
-    /// Clears all audio files stored in the document directory.
     private func clearAudioFiles() {
-        let fileURLs = listAudioFiles()  // This now returns full URLs as strings
-        fileURLs.forEach { fileURLString in
-            if let fileURL = URL(string: fileURLString) {
-                do {
-                    try FileManager.default.removeItem(at: fileURL)
-                    print("Removed file at:", fileURL.path)
-                } catch {
-                    print("Error removing file at \(fileURL.path):", error.localizedDescription)
-                }
-            } else {
-                print("Invalid URL string: \(fileURLString)")
-            }
-        }
+        // No-op: file output has been removed from the recording pipeline
     }
-    
-    /// Lists all audio files stored in the document directory.
-    ///
-    /// - Returns: An array of file URIs as strings.
+
     func listAudioFiles() -> [String] {
-        guard let documentDirectory = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false) else {
-            print("Failed to access document directory.")
-            return []
-        }
-        
-        do {
-            let files = try FileManager.default.contentsOfDirectory(at: documentDirectory, includingPropertiesForKeys: nil)
-            let audioFiles = files.filter { $0.pathExtension == "wav" }.map { $0.absoluteString }
-            return audioFiles
-        } catch {
-            print("Error listing audio files:", error.localizedDescription)
-            return []
-        }
+        return []
     }
     
     func onMicrophoneData(_ microphoneData: Data, _ soundLevel: Float?) {

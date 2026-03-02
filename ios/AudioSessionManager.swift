@@ -3,21 +3,6 @@ import AVFoundation
 import Accelerate
 import ExpoModulesCore
 
-// Helper to convert to little-endian byte array
-extension UInt32 {
-    var littleEndianBytes: [UInt8] {
-        let value = self.littleEndian
-        return [UInt8(value & 0xff), UInt8((value >> 8) & 0xff), UInt8((value >> 16) & 0xff), UInt8((value >> 24) & 0xff)]
-    }
-}
-
-extension UInt16 {
-    var littleEndianBytes: [UInt8] {
-        let value = self.littleEndian
-        return [UInt8(value & 0xff), UInt8((value >> 8) & 0xff)]
-    }
-}
-
 class AudioSessionManager {
     private var audioEngine = AVAudioEngine()
     private var inputNode: AVAudioInputNode {
@@ -35,7 +20,6 @@ class AudioSessionManager {
     private let bufferAccessQueue = DispatchQueue(label: "com.expoaudiostream.bufferAccessQueue") // Serial queue for thread-safe buffer access
 
     
-    internal var recordingFileURL: URL?
     private var startTime: Date?
     private var pauseStartTime: Date?
 
@@ -46,7 +30,6 @@ class AudioSessionManager {
     private var isRecording = false
     private var isPaused = false
     private var pausedDuration = 0
-    private var fileManager = FileManager.default
     internal var recordingSettings: RecordingSettings?
     internal var recordingUUID: UUID?
     internal var mimeType: String = "audio/wav"
@@ -147,56 +130,6 @@ class AudioSessionManager {
         } catch {
             Logger.debug("Change route if failed: Error \(error.localizedDescription)")
         }
-    }
-    
-    /// Creates a new recording file.
-    /// - Returns: The URL of the newly created recording file, or nil if creation failed.
-    private func createRecordingFile() -> URL? {
-        let documentsDirectory = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
-        recordingUUID = UUID()
-        let fileName = "\(recordingUUID!.uuidString).wav"
-        let fileURL = documentsDirectory.appendingPathComponent(fileName)
-        
-        if !fileManager.createFile(atPath: fileURL.path, contents: nil, attributes: nil) {
-            Logger.debug("Failed to create file at: \(fileURL.path)")
-            return nil
-        }
-        return fileURL
-    }
-    
-    /// Creates a WAV header for the given data size.
-    /// - Parameter dataSize: The size of the audio data.
-    /// - Returns: A Data object containing the WAV header.
-    private func createWavHeader(dataSize: Int) -> Data {
-        var header = Data()
-        
-        let sampleRate = UInt32(recordingSettings!.sampleRate)
-        let channels = UInt32(recordingSettings!.numberOfChannels)
-        let bitDepth = UInt32(recordingSettings!.bitDepth)
-        
-        let blockAlign = channels * (bitDepth / 8)
-        let byteRate = sampleRate * blockAlign
-        
-        // "RIFF" chunk descriptor
-        header.append(contentsOf: "RIFF".utf8)
-        header.append(contentsOf: UInt32(36 + dataSize).littleEndianBytes)
-        header.append(contentsOf: "WAVE".utf8)
-        
-        // "fmt " sub-chunk
-        header.append(contentsOf: "fmt ".utf8)
-        header.append(contentsOf: UInt32(16).littleEndianBytes)  // PCM format requires 16 bytes for the fmt sub-chunk
-        header.append(contentsOf: UInt16(1).littleEndianBytes)   // Audio format 1 for PCM
-        header.append(contentsOf: UInt16(channels).littleEndianBytes)
-        header.append(contentsOf: sampleRate.littleEndianBytes)
-        header.append(contentsOf: byteRate.littleEndianBytes)    // byteRate
-        header.append(contentsOf: UInt16(blockAlign).littleEndianBytes)  // blockAlign
-        header.append(contentsOf: UInt16(bitDepth).littleEndianBytes)  // bits per sample
-        
-        // "data" sub-chunk
-        header.append(contentsOf: "data".utf8)
-        header.append(contentsOf: UInt32(dataSize).littleEndianBytes)  // Sub-chunk data size
-        
-        return header
     }
     
     /// Describes the format of the given audio format.
@@ -455,30 +388,26 @@ class AudioSessionManager {
         
         audioEngine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: audioFormat) { [weak self] (buffer, time) in
             guard let self = self else {
-                Logger.debug("Error: File URL or self is nil during buffer processing.")
+                Logger.debug("Error: self is nil during buffer processing.")
                 return
             }
             let formatDescription = describeAudioFormat(buffer.format)
             Logger.debug("Debug: Buffer format - \(formatDescription)")
-            
+
             // Processing the current buffer
-            self.processAudioBuffer(buffer, fileURL: self.recordingFileURL!)
+            self.processAudioBuffer(buffer)
             self.lastBufferTime = time
         }
-        
-        recordingFileURL = createRecordingFile()
-        if recordingFileURL == nil {
-            Logger.debug("Error: Failed to create recording file.")
-            return StartRecordingResult(error: "Error: Failed to create recording file.")
-        }
-        
+
+        recordingUUID = UUID()
+
         do {
             startTime = Date()
             try audioEngine.start()
             isRecording = true
             Logger.debug("Debug: Recording started successfully.")
             return StartRecordingResult(
-                fileUri: recordingFileURL!.path,
+                fileUri: "",
                 mimeType: mimeType,
                 channels: settings.numberOfChannels,
                 bitDepth: settings.bitDepth,
@@ -512,12 +441,12 @@ class AudioSessionManager {
         }
         isRecording = false
         
-        guard let fileURL = recordingFileURL, let startTime = startTime, let settings = recordingSettings else {
-            Logger.debug("Recording or file URL is nil.")
+        guard let startTime = startTime, let settings = recordingSettings else {
+            Logger.debug("Recording settings are nil.")
             return RecordingResult(fileUri: "",
-                                    error: "Recording or file URL is nil.")
+                                    error: "Recording settings are nil.")
         }
-        
+
         // Emit any remaining accumulated data
         if !accumulatedData.isEmpty {
             let currentTime = Date()
@@ -525,38 +454,23 @@ class AudioSessionManager {
             delegate?.audioStreamManager(self, didReceiveAudioData: accumulatedData, recordingTime: recordingTime, totalDataSize: totalDataSize)
             accumulatedData.removeAll()
         }
-        
+
         let endTime = Date()
         let duration = Int64(endTime.timeIntervalSince(startTime) * 1000) - Int64(pausedDuration * 1000)
-        
-        // Calculate the total size of audio data written to the file
-        let filePath = fileURL.path
-        do {
-            let fileAttributes = try FileManager.default.attributesOfItem(atPath: filePath)
-            let fileSize = fileAttributes[FileAttributeKey.size] as? Int64 ?? 0
-            
-            // Update the WAV header with the correct file size
-            updateWavHeader(fileURL: fileURL, totalDataSize: fileSize - 44) // Subtract the header size to get audio data size
-            
-            let result = RecordingResult(
-                fileUri: fileURL.absoluteString,
-                filename: fileURL.lastPathComponent,
-                mimeType: mimeType,
-                duration: duration,
-                size: fileSize,
-                channels: settings.numberOfChannels,
-                bitDepth: settings.bitDepth,
-                sampleRate: settings.sampleRate
-            )
-            recordingFileURL = nil // Reset for next recording
-            lastBufferTime = nil // Reset last buffer time
-            
-            return result
-        } catch {
-            Logger.debug("Failed to fetch file attributes: \(error.localizedDescription)")
-            return RecordingResult(fileUri: "",
-                                   error: "Failed to fetch file attributes: \(error.localizedDescription)")
-        }
+
+        let result = RecordingResult(
+            fileUri: "",
+            filename: "",
+            mimeType: mimeType,
+            duration: duration,
+            size: totalDataSize,
+            channels: settings.numberOfChannels,
+            bitDepth: settings.bitDepth,
+            sampleRate: settings.sampleRate
+        )
+        lastBufferTime = nil // Reset last buffer time
+
+        return result
     }
     
     private func destroyPlayerNode() {
@@ -720,51 +634,12 @@ class AudioSessionManager {
     
     
     
-    /// Updates the WAV header with the correct file size.
-    /// - Parameters:
-    ///   - fileURL: The URL of the WAV file.
-    ///   - totalDataSize: The total size of the audio data.
-    private func updateWavHeader(fileURL: URL, totalDataSize: Int64) {
-        do {
-            let fileHandle = try FileHandle(forUpdating: fileURL)
-            defer { fileHandle.closeFile() }
-            
-            // Calculate sizes
-            let fileSize = totalDataSize + 44 - 8 // Total file size minus 8 bytes for 'RIFF' and size field itself
-            let dataSize = totalDataSize // Size of the 'data' sub-chunk
-            
-            // Update RIFF chunk size at offset 4
-            fileHandle.seek(toFileOffset: 4)
-            if (fileSize > 0) {
-                let fileSizeBytes = UInt32(fileSize).littleEndianBytes
-                fileHandle.write(Data(fileSizeBytes))
-                
-                // Update data chunk size at offset 40
-                fileHandle.seek(toFileOffset: 40)
-                let dataSizeBytes = UInt32(dataSize).littleEndianBytes
-                fileHandle.write(Data(dataSizeBytes))
-            } else {
-                Logger.debug("File size is negative which means it is an error before")
-            }
-            
-        } catch let error {
-            Logger.debug("Error updating WAV header: \(error)")
-        }
-    }
-    
-    /// Processes the audio buffer and writes data to the file. Also handles audio processing if enabled.
-    /// - Parameters:
-    ///   - buffer: The audio buffer to process.
-    ///   - fileURL: The URL of the file to write the data to.
-    private func processAudioBuffer(_ buffer: AVAudioPCMBuffer, fileURL: URL) {
-        guard let fileHandle = try? FileHandle(forWritingTo: fileURL) else {
-            Logger.debug("Failed to open file handle for URL: \(fileURL)")
-            return
-        }
-        
+    /// Processes the audio buffer in memory. Also handles resampling if needed.
+    /// - Parameter buffer: The audio buffer to process.
+    private func processAudioBuffer(_ buffer: AVAudioPCMBuffer) {
         let targetSampleRate = recordingSettings?.desiredSampleRate ?? buffer.format.sampleRate
         let finalBuffer: AVAudioPCMBuffer
-        
+
         if buffer.format.sampleRate != targetSampleRate {
             // Resample the audio buffer if the target sample rate is different from the input sample rate
             if let resampledBuffer = resampleAudioBuffer(buffer, from: buffer.format.sampleRate, to: targetSampleRate) {
@@ -776,7 +651,7 @@ class AudioSessionManager {
                 }
             } else {
                 Logger.debug("Fallback to AVAudioConverter. Converting from \(buffer.format.sampleRate) Hz to \(targetSampleRate) Hz")
-                
+
                 if let convertedBuffer = self.tryConvertToFormat(inputBuffer: buffer, desiredSampleRate: targetSampleRate, desiredChannel: 1) {
                     finalBuffer = convertedBuffer
                       // Update recording sample rate to reflect the actual data being written
@@ -793,42 +668,29 @@ class AudioSessionManager {
             // Use the original buffer if the sample rates are the same
             finalBuffer = buffer
         }
-        
+
         let audioData = finalBuffer.audioBufferList.pointee.mBuffers
         guard let bufferData = audioData.mData else {
             Logger.debug("Buffer data is nil.")
             return
         }
-        var data = Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
-        
-        // Check if this is the first buffer to process and totalDataSize is 0
-        if totalDataSize == 0 {
-            // Since it's the first buffer, prepend the WAV header
-            let header = createWavHeader(dataSize: 0)  // Set initial dataSize to 0, update later
-            data.insert(contentsOf: header, at: 0)
-        }
-        
+        let data = Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
+
         // Accumulate new data
         accumulatedData.append(data)
-        
-        //        print("Writing data size: \(data.count) bytes")  // Debug: Check the size of data being written
-        fileHandle.seekToEndOfFile()
-        fileHandle.write(data)
-        fileHandle.closeFile()
-        
+
         totalDataSize += Int64(data.count)
-        //        print("Total data size written: \(totalDataSize) bytes")  // Debug: Check total data written
-        
+
         let currentTime = Date()
         if let lastEmissionTime = lastEmissionTime, currentTime.timeIntervalSince(lastEmissionTime) >= emissionInterval {
             if let startTime = startTime {
                 let recordingTime = currentTime.timeIntervalSince(startTime)
                 // Copy accumulated data for processing
                 let dataToProcess = accumulatedData
-                
+
                 // Emit the processed audio data
                 self.delegate?.audioStreamManager(self, didReceiveAudioData: dataToProcess, recordingTime: recordingTime, totalDataSize: totalDataSize)
-                
+
                 self.lastEmissionTime = currentTime // Update last emission time
                 self.lastEmittedSize = totalDataSize
                 accumulatedData.removeAll() // Reset accumulated data after emission
