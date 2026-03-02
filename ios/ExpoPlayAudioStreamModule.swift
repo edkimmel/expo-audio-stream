@@ -74,14 +74,14 @@ public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, Micr
         Function("destroy") {
             self._pipelineIntegration?.destroy()
             self._pipelineIntegration = nil
+            if self.isAudioSessionInitialized {
+                let audioSession = AVAudioSession.sharedInstance()
+                try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+                self.isAudioSessionInitialized = false
+            }
             self._audioSessionManager = nil
             self._microphone = nil
             self._soundPlayer = nil
-            if self.isAudioSessionInitialized {
-                let audioSession = AVAudioSession.sharedInstance()
-                try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
-                self.isAudioSessionInitialized = false
-            }
         }
         
         /// Prompts the user to select the microphone mode.

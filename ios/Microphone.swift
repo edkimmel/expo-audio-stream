@@ -212,7 +212,7 @@ class Microphone {
             finalBuffer = buffer
         }
         
-         let powerLevel: Float = self.isSilent ? -160.0 : AudioUtils.calculatePowerLevel(from: finalBuffer)
+        let powerLevel: Float = self.isSilent ? -160.0 : AudioUtils.calculatePowerLevel(from: finalBuffer)
         
         let audioData = finalBuffer.audioBufferList.pointee.mBuffers
         guard let bufferData = audioData.mData else {
