@@ -113,13 +113,10 @@ class AudioPipeline {
 
         do {
             // ── 1. JitterBuffer ─────────────────────────────────────────
-            // Ring capacity: 10 seconds of audio
-            let ringCapacity = sampleRate * channelCount * 10
             jitterBuffer = JitterBuffer(
                 sampleRate: sampleRate,
                 channels: channelCount,
-                targetBufferMs: targetBufferMs,
-                capacitySamples: ringCapacity
+                targetBufferMs: targetBufferMs
             )
 
             // ── 2. Pre-allocate render buffer ───────────────────────────
@@ -129,7 +126,7 @@ class AudioPipeline {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(
                 .playAndRecord, mode: .default,
-                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
+                options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP])
             try session.setActive(true)
 
             // ── 4. AVAudioEngine + PlayerNode ───────────────────────────

@@ -1,18 +1,21 @@
 package expo.modules.audiostream.pipeline
 
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Lock-based circular ring buffer for PCM audio (16-bit signed, little-endian).
+ * Lock-based chunk queue for PCM audio (16-bit signed, little-endian).
  *
  * Single producer (bridge thread) writes decoded PCM via [write].
  * Single consumer (write thread) drains via [read].
  * All shared state is guarded by a [ReentrantLock].
  *
  * Features:
+ *   - Chunk queue: incoming [ShortArray] chunks are enqueued by reference
+ *     (zero-copy on the producer side). No fixed capacity limit.
  *   - Priming gate: [read] returns silence until [targetBufferMs] of audio has
  *     accumulated (or [markEndOfStream] force-primes so the tail drains).
  *   - Silence-fill on underflow: when the buffer has fewer samples than the
@@ -27,15 +30,12 @@ class JitterBuffer(
     /** Number of channels (1 = mono, 2 = stereo). */
     private val channels: Int,
     /** How many ms of audio to accumulate before the priming gate opens. */
-    private val targetBufferMs: Int,
-    /** Ring capacity in *samples* (not bytes). Caller sizes this at connect time. */
-    capacitySamples: Int
+    private val targetBufferMs: Int
 ) {
-    // ── Ring storage ────────────────────────────────────────────────────
-    private val ring = ShortArray(capacitySamples)
-    private var writePos = 0          // next index the producer will fill
-    private var readPos = 0           // next index the consumer will drain
-    private var count = 0             // number of live samples in the ring
+    // ── Chunk queue storage ──────────────────────────────────────────────
+    private val chunks = ArrayDeque<ShortArray>()
+    private var readCursor = 0        // offset into the head chunk
+    private var count = 0             // total live samples across all chunks
 
     // ── Priming gate ────────────────────────────────────────────────────
     private val primingSamples: Int =
@@ -64,31 +64,28 @@ class JitterBuffer(
     // ── Producer API ────────────────────────────────────────────────────
 
     /**
-     * Append [samples] into the ring buffer.
+     * Enqueue [samples] into the chunk queue.
      *
-     * If there isn't enough room the *oldest* samples are silently dropped
-     * (overwrite semantics) — this keeps the buffer fresh rather than
-     * blocking the bridge thread.
+     * When the full array is passed (offset == 0, length == samples.size),
+     * the array reference is stored directly — zero copy. Otherwise a
+     * subrange copy is made.
      *
-     * @return number of samples actually written (always `samples.size`).
+     * @return number of samples enqueued (always [length]).
      */
     fun write(samples: ShortArray, offset: Int = 0, length: Int = samples.size): Int {
         lock.withLock {
-            for (i in 0 until length) {
-                if (count == ring.size) {
-                    // Overwrite oldest – advance readPos
-                    readPos = (readPos + 1) % ring.size
-                    count--
-                }
-                ring[writePos] = samples[offset + i]
-                writePos = (writePos + 1) % ring.size
-                count++
+            val chunk = if (offset == 0 && length == samples.size) {
+                samples
+            } else {
+                samples.copyOfRange(offset, offset + length)
             }
 
+            chunks.addLast(chunk)
+            count += length
+
             // Update peak telemetry
-            val current = count
-            if (current > peakLevel.get()) {
-                peakLevel.set(current)
+            if (count > peakLevel.get()) {
+                peakLevel.set(count)
             }
 
             totalWritten.addAndGet(length.toLong())
@@ -105,7 +102,7 @@ class JitterBuffer(
     // ── Consumer API ────────────────────────────────────────────────────
 
     /**
-     * Fill [dest] with up to [length] samples from the ring buffer.
+     * Fill [dest] with up to [length] samples from the chunk queue.
      *
      * Behaviour depends on the priming gate:
      *   - **Not primed & no end-of-stream**: fills [dest] with silence and
@@ -121,26 +118,33 @@ class JitterBuffer(
         lock.withLock {
             if (!primed) {
                 // Still priming – fill with silence
-                for (i in 0 until length) {
-                    dest[offset + i] = 0
-                }
+                dest.fill(0, offset, offset + length)
                 return length
             }
 
-            val available = count.coerceAtMost(length)
+            var destPos = offset
+            var remaining = length
 
-            // Copy available samples
-            for (i in 0 until available) {
-                dest[offset + i] = ring[readPos]
-                readPos = (readPos + 1) % ring.size
+            while (remaining > 0 && chunks.isNotEmpty()) {
+                val chunk = chunks.peekFirst()
+                val available = chunk.size - readCursor
+                val toCopy = minOf(available, remaining)
+
+                System.arraycopy(chunk, readCursor, dest, destPos, toCopy)
+                readCursor += toCopy
+                destPos += toCopy
+                remaining -= toCopy
+                count -= toCopy
+
+                if (readCursor >= chunk.size) {
+                    chunks.pollFirst()
+                    readCursor = 0
+                }
             }
-            count -= available
 
             // Silence-fill remainder on underflow
-            if (available < length) {
-                for (i in available until length) {
-                    dest[offset + i] = 0
-                }
+            if (remaining > 0) {
+                dest.fill(0, destPos, destPos + remaining)
                 underrunCount.incrementAndGet()
             }
 
@@ -200,8 +204,8 @@ class JitterBuffer(
      */
     fun reset() {
         lock.withLock {
-            writePos = 0
-            readPos = 0
+            chunks.clear()
+            readCursor = 0
             count = 0
             primed = false
             endOfStream = false

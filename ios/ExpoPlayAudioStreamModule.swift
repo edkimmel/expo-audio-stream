@@ -193,7 +193,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
         }
 
         Function("toggleSilence") { (isSilent: Bool) in
-            microphone.toggleSilence(isSilent)
+            microphone.toggleSilence(isSilent: isSilent)
         }
 
         /// Sets the sound player configuration

@@ -95,7 +95,7 @@ class AudioUtils {
     ) -> AVAudioPCMBuffer? {
         var error: NSError? = nil
         let depth = bitDepth ?? 16
-        var commonFormat: AVAudioCommonFormat = getCommonFormat(depth: depth)
+        let commonFormat: AVAudioCommonFormat = getCommonFormat(depth: depth)
         guard let nativeInputFormat = AVAudioFormat(commonFormat: commonFormat, sampleRate: buffer.format.sampleRate, channels: 1, interleaved: true) else {
             Logger.debug("AudioSessionManager: Failed to convert to desired format. AudioFormat is corrupted.")
             return nil

@@ -1,30 +1,29 @@
 import Foundation
 
-/// Lock-based circular ring buffer for PCM audio (16-bit signed, little-endian).
+/// Lock-based chunk queue for PCM audio (16-bit signed, little-endian).
 ///
 /// Single producer (bridge thread) writes decoded PCM via `write()`.
 /// Single consumer (scheduling thread) drains via `read()`.
 /// All shared state is guarded by an NSLock.
 ///
 /// Features:
+///   - Chunk queue: incoming `[Int16]` chunks are stored by reference
+///     (copy-on-write, zero actual copy since neither side mutates after write).
+///     No fixed capacity limit.
 ///   - Priming gate: `read()` returns silence until `targetBufferMs` of audio has
 ///     accumulated (or `markEndOfStream()` force-primes so the tail drains).
 ///   - Silence-fill on underflow: when the buffer has fewer samples than the
 ///     consumer requested, the remainder is filled with silence and an underrun
 ///     is counted.
-///   - Overwrite-on-full: if the ring is full, the oldest samples are dropped
-///     rather than blocking the producer. This keeps the buffer fresh and ensures
-///     zero backpressure on the JS/bridge thread.
 class JitterBuffer {
     private let sampleRate: Int
     private let channels: Int
     private let targetBufferMs: Int
 
-    // ── Ring storage ────────────────────────────────────────────────────
-    private var ring: [Int16]
-    private var writePos: Int = 0
-    private var readPos: Int = 0
-    private var count: Int = 0
+    // ── Chunk queue storage ──────────────────────────────────────────────
+    private var chunks: [[Int16]] = []
+    private var readCursor: Int = 0   // offset into the head chunk
+    private var count: Int = 0        // total live samples across all chunks
 
     // ── Priming gate ────────────────────────────────────────────────────
     private let primingSamples: Int
@@ -42,37 +41,34 @@ class JitterBuffer {
     private(set) var underrunCount: Int = 0
     private(set) var peakLevel: Int = 0
 
-    init(sampleRate: Int, channels: Int, targetBufferMs: Int, capacitySamples: Int) {
+    init(sampleRate: Int, channels: Int, targetBufferMs: Int) {
         self.sampleRate = sampleRate
         self.channels = channels
         self.targetBufferMs = targetBufferMs
-        self.ring = [Int16](repeating: 0, count: capacitySamples)
         self.primingSamples = (sampleRate * channels * targetBufferMs) / 1000
     }
 
     // ── Producer API ────────────────────────────────────────────────────
 
-    /// Append samples into the ring buffer.
+    /// Enqueue samples into the chunk queue.
     ///
-    /// If there isn't enough room the oldest samples are silently dropped
-    /// (overwrite semantics) — this keeps the buffer fresh rather than
-    /// blocking the bridge thread.
+    /// The array is stored directly (Swift CoW means zero actual copy
+    /// as long as neither side mutates after the call).
     @discardableResult
     func write(samples: [Int16], offset: Int = 0, length: Int? = nil) -> Int {
         let len = length ?? samples.count
         lock.lock()
         defer { lock.unlock() }
 
-        for i in 0..<len {
-            if count == ring.count {
-                // Overwrite oldest — advance readPos
-                readPos = (readPos + 1) % ring.count
-                count -= 1
-            }
-            ring[writePos] = samples[offset + i]
-            writePos = (writePos + 1) % ring.count
-            count += 1
+        let chunk: [Int16]
+        if offset == 0 && len == samples.count {
+            chunk = samples
+        } else {
+            chunk = Array(samples[offset..<(offset + len)])
         }
+
+        chunks.append(chunk)
+        count += len
 
         // Update peak telemetry
         if count > peakLevel {
@@ -90,7 +86,7 @@ class JitterBuffer {
 
     // ── Consumer API ────────────────────────────────────────────────────
 
-    /// Fill `dest` with up to `length` samples from the ring buffer.
+    /// Fill `dest` with up to `length` samples from the chunk queue.
     ///
     /// - Not primed & no end-of-stream: fills with silence.
     /// - Primed: copies available samples; remainder is zero-filled
@@ -108,18 +104,32 @@ class JitterBuffer {
             return len
         }
 
-        let available = min(count, len)
+        var destPos = offset
+        var remaining = len
 
-        for i in 0..<available {
-            dest[offset + i] = ring[readPos]
-            readPos = (readPos + 1) % ring.count
+        while remaining > 0 && !chunks.isEmpty {
+            let chunk = chunks[0]
+            let available = chunk.count - readCursor
+            let toCopy = min(available, remaining)
+
+            for i in 0..<toCopy {
+                dest[destPos + i] = chunk[readCursor + i]
+            }
+            readCursor += toCopy
+            destPos += toCopy
+            remaining -= toCopy
+            count -= toCopy
+
+            if readCursor >= chunk.count {
+                chunks.removeFirst()
+                readCursor = 0
+            }
         }
-        count -= available
 
         // Silence-fill remainder on underflow
-        if available < len {
-            for i in available..<len {
-                dest[offset + i] = 0
+        if remaining > 0 {
+            for i in 0..<remaining {
+                dest[destPos + i] = 0
             }
             underrunCount += 1
         }
@@ -176,8 +186,8 @@ class JitterBuffer {
     func reset() {
         lock.lock()
         defer { lock.unlock() }
-        writePos = 0
-        readPos = 0
+        chunks.removeAll()
+        readCursor = 0
         count = 0
         primed = false
         endOfStream = false

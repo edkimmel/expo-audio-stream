@@ -1885,6 +1885,21 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@edkimmel/expo-audio-stream@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "@edkimmel/expo-audio-stream@workspace:."
+  dependencies:
+    "@types/react": "npm:^19.0.0"
+    expo-module-scripts: "npm:^4.0.0"
+    expo-modules-core: "npm:^2.2.0"
+    husky: "npm:^9.0.11"
+  peerDependencies:
+    expo: "*"
+    react: "*"
+    react-native: "*"
+  languageName: unknown
+  linkType: soft
+
 "@eslint-community/eslint-utils@npm:^4.1.2, @eslint-community/eslint-utils@npm:^4.5.0, @eslint-community/eslint-utils@npm:^4.7.0":
   version: 4.9.0
   resolution: "@eslint-community/eslint-utils@npm:4.9.0"
@@ -2265,21 +2280,6 @@ __metadata:
   checksum: 10c0/4b30ec8cd56c5fd9a661f088230af01e0c1a3888d11ffb6b47639700f71225be21d1f7e168048d6d4f9449207b978a235c07c8f15c07705685d16dc06280e9d9
   languageName: node
   linkType: hard
-
-"@mykin-ai/expo-audio-stream@workspace:.":
-  version: 0.0.0-use.local
-  resolution: "@mykin-ai/expo-audio-stream@workspace:."
-  dependencies:
-    "@types/react": "npm:^19.0.0"
-    expo-module-scripts: "npm:^4.0.0"
-    expo-modules-core: "npm:^2.2.0"
-    husky: "npm:^9.0.11"
-  peerDependencies:
-    expo: "*"
-    react: "*"
-    react-native: "*"
-  languageName: unknown
-  linkType: soft
 
 "@nicolo-ribaudo/chokidar-2@npm:2.1.8-no-fsevents.3":
   version: 2.1.8-no-fsevents.3

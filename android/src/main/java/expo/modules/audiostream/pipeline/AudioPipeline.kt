@@ -196,13 +196,10 @@ class AudioPipeline(
 
         try {
             // ── 1. JitterBuffer ─────────────────────────────────────────
-            // Ring capacity: enough for ~2 s of audio + headroom
-            val ringCapacity = sampleRate * channelCount * 10
             jitterBuffer = JitterBuffer(
                 sampleRate = sampleRate,
                 channels = channelCount,
-                targetBufferMs = targetBufferMs,
-                capacitySamples = ringCapacity
+                targetBufferMs = targetBufferMs
             )
 
             // ── 2. AudioTrack ───────────────────────────────────────────
