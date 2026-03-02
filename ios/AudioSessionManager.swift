@@ -386,7 +386,13 @@ class AudioSessionManager {
             return StartRecordingResult(error: "Error: Failed to create audio format with the specified bit depth.")
         }
         
-        audioEngine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: audioFormat) { [weak self] (buffer, time) in
+        // Compute tap buffer size from interval so Core Audio delivers at the right cadence
+        let intervalSamples = AVAudioFrameCount(
+            max(Double(intervalMilliseconds), 100.0) / 1000.0 * newSettings.sampleRate
+        )
+        let tapBufferSize = max(intervalSamples, 256) // floor at 256 frames
+
+        audioEngine.inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: audioFormat) { [weak self] (buffer, time) in
             guard let self = self else {
                 Logger.debug("Error: self is nil during buffer processing.")
                 return
@@ -445,14 +451,6 @@ class AudioSessionManager {
             Logger.debug("Recording settings are nil.")
             return RecordingResult(fileUri: "",
                                     error: "Recording settings are nil.")
-        }
-
-        // Emit any remaining accumulated data
-        if !accumulatedData.isEmpty {
-            let currentTime = Date()
-            let recordingTime = currentTime.timeIntervalSince(startTime)
-            delegate?.audioStreamManager(self, didReceiveAudioData: accumulatedData, recordingTime: recordingTime, totalDataSize: totalDataSize)
-            accumulatedData.removeAll()
         }
 
         let endTime = Date()
@@ -676,25 +674,13 @@ class AudioSessionManager {
         }
         let data = Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
 
-        // Accumulate new data
-        accumulatedData.append(data)
-
         totalDataSize += Int64(data.count)
 
-        let currentTime = Date()
-        if let lastEmissionTime = lastEmissionTime, currentTime.timeIntervalSince(lastEmissionTime) >= emissionInterval {
-            if let startTime = startTime {
-                let recordingTime = currentTime.timeIntervalSince(startTime)
-                // Copy accumulated data for processing
-                let dataToProcess = accumulatedData
-
-                // Emit the processed audio data
-                self.delegate?.audioStreamManager(self, didReceiveAudioData: dataToProcess, recordingTime: recordingTime, totalDataSize: totalDataSize)
-
-                self.lastEmissionTime = currentTime // Update last emission time
-                self.lastEmittedSize = totalDataSize
-                accumulatedData.removeAll() // Reset accumulated data after emission
-            }
+        // Emit immediately — tap buffer size is already interval-aligned
+        if let startTime = startTime {
+            let recordingTime = Date().timeIntervalSince(startTime)
+            self.delegate?.audioStreamManager(self, didReceiveAudioData: data, recordingTime: recordingTime, totalDataSize: totalDataSize)
+            self.lastEmittedSize = totalDataSize
         }
     }
     

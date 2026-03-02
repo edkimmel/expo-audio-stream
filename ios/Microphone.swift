@@ -122,7 +122,13 @@ class Microphone {
             return StartRecordingResult(error: "Error: Failed to create audio format with the specified bit depth.")
         }
         
-        audioEngine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: audioFormat) { [weak self] (buffer, time) in
+        // Compute tap buffer size from interval so Core Audio delivers at the right cadence
+        let intervalSamples = AVAudioFrameCount(
+            max(Double(intervalMilliseconds), 100.0) / 1000.0 * newSettings.sampleRate
+        )
+        let tapBufferSize = max(intervalSamples, 256) // floor at 256 frames
+
+        audioEngine.inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: audioFormat) { [weak self] (buffer, time) in
             guard let self = self else {
                 Logger.debug("Error: File URL or self is nil during buffer processing.")
                 return
@@ -206,29 +212,15 @@ class Microphone {
             return
         }
         
-        //let data = Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
         let data = isSilent
                     ? Data(repeating: 0, count:
                             Int(finalBuffer.frameCapacity) * Int(finalBuffer.format.streamDescription.pointee.mBytesPerFrame))
                     : Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
-        // Accumulate new data
-        accumulatedData.append(data)
+
         totalDataSize += Int64(data.count)
-        
-        let currentTime = Date()
-        if let lastEmissionTime = lastEmissionTime, currentTime.timeIntervalSince(lastEmissionTime) >= emissionInterval {
-            if let startTime = startTime {
-                _ = currentTime.timeIntervalSince(startTime)
-                // Copy accumulated data for processing
-                let dataToProcess = accumulatedData
-                
-                // Emit the processed audio data
-                self.delegate?.onMicrophoneData(dataToProcess, powerLevel)
-                
-                self.lastEmissionTime = currentTime // Update last emission time
-                self.lastEmittedSize = totalDataSize
-                accumulatedData.removeAll() // Reset accumulated data after emission
-            }
-        }
+
+        // Emit immediately — tap buffer size is already interval-aligned
+        self.delegate?.onMicrophoneData(data, powerLevel)
+        self.lastEmittedSize = totalDataSize
     }
 }
