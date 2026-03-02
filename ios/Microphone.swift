@@ -67,9 +67,9 @@ class Microphone {
         }
     }
     
-    func toggleSilence() {
+    func toggleSilence(isSilent: Bool) {
         Logger.debug("[Microphone] toggleSilence")
-        self.isSilent = !self.isSilent
+        self.isSilent = isSilent
     }
     
     func startRecording(settings: RecordingSettings, intervalMilliseconds: Int) -> StartRecordingResult? {
@@ -169,8 +169,13 @@ class Microphone {
         }
         self.isRecording = false
         self.isVoiceProcessingEnabled = false
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+       
+        // Remove tap before stopping the engine
+        if audioEngine != nil {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            audioEngine.stop()
+        }
+        
         if let promiseResolver = promise {
             promiseResolver.resolve(nil)
         }
@@ -207,7 +212,7 @@ class Microphone {
             finalBuffer = buffer
         }
         
-        let powerLevel: Float = AudioUtils.calculatePowerLevel(from: finalBuffer)
+         let powerLevel: Float = self.isSilent ? -160.0 : AudioUtils.calculatePowerLevel(from: finalBuffer)
         
         let audioData = finalBuffer.audioBufferList.pointee.mBuffers
         guard let bufferData = audioData.mData else {

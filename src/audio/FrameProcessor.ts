@@ -10,8 +10,6 @@ import {
  */
 export class FrameProcessor implements IFrameProcessor {
   private static readonly _bytesPerSample = 2; // 16-bit PCM
-  private static readonly _maxReasonableChunkSizeBytes =
-    64 * 1024; // 64KB safety
   private static readonly _validBase64Regex =
     /^[A-Za-z0-9+/]*={0,2}$/;
 
@@ -86,20 +84,6 @@ export class FrameProcessor implements IFrameProcessor {
       return false;
     }
 
-    // Estimate decoded size for safety
-    const estimatedDecodedSize =
-      (payload.audioData.length * 3) / 4;
-    if (
-      estimatedDecodedSize >
-      FrameProcessor._maxReasonableChunkSizeBytes
-    ) {
-      console.warn(
-        'FrameProcessor: Chunk size exceeds reasonable limit:',
-        estimatedDecodedSize
-      );
-      return false;
-    }
-
     return true;
   }
 
@@ -142,15 +126,6 @@ export class FrameProcessor implements IFrameProcessor {
         estimatedBytes / FrameProcessor._bytesPerSample;
       const durationMs =
         (sampleCount / this._sampleRate) * 1000;
-
-      // Sanity check and fallback to frame interval
-      if (durationMs <= 0 || durationMs > 1000) {
-        console.warn(
-          'FrameProcessor: Calculated duration out of range, using frame interval:',
-          durationMs
-        );
-        return this._frameIntervalMs;
-      }
 
       return Math.round(durationMs);
     } catch (error) {

@@ -77,7 +77,11 @@ public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, Micr
             self._audioSessionManager = nil
             self._microphone = nil
             self._soundPlayer = nil
-            self.isAudioSessionInitialized = false
+            if self.isAudioSessionInitialized {
+                let audioSession = AVAudioSession.sharedInstance()
+                try audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+                self.isAudioSessionInitialized = false
+            }
         }
         
         /// Prompts the user to select the microphone mode.
@@ -355,8 +359,8 @@ public class ExpoPlayAudioStreamModule: Module, AudioStreamManagerDelegate, Micr
             microphone.stopRecording(resolver: promise)
         }
         
-        Function("toggleSilence") {
-            microphone.toggleSilence()
+        Function("toggleSilence") { (isSilent: Bool) in
+            microphone.toggleSilence(isSilent)
         }
         
         /// Sets the sound player configuration
