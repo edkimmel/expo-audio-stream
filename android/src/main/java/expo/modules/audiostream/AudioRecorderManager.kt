@@ -335,31 +335,71 @@ class AudioRecorderManager(
     private fun recordingProcess() {
         Log.i(Constants.TAG, "Starting recording process, readSize=$readSizeInBytes, ringBuffer=$bufferSizeInBytes")
         val audioData = ByteArray(readSizeInBytes)
-        while (isRecording.get() && !Thread.currentThread().isInterrupted) {
-            if (isPaused.get()) {
-                Thread.sleep(10)
-                continue
-            }
+        var consecutiveErrors = 0
 
-            val bytesRead = synchronized(audioRecordLock) {
-                audioRecord?.let {
-                    if (it.state != AudioRecord.STATE_INITIALIZED) {
-                        Log.e(Constants.TAG, "AudioRecord not initialized")
-                        return@let -1
+        try {
+            while (isRecording.get() && !Thread.currentThread().isInterrupted) {
+                if (isPaused.get()) {
+                    try {
+                        Thread.sleep(10)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        break
                     }
-                    // Read exactly one interval's worth of audio.
-                    // AudioRecord.read() blocks until readSizeInBytes are available.
-                    it.read(audioData, 0, readSizeInBytes).also { bytes ->
-                        if (bytes < 0) {
-                            Log.e(Constants.TAG, "AudioRecord read error: $bytes")
+                    continue
+                }
+
+                val bytesRead = synchronized(audioRecordLock) {
+                    audioRecord?.let {
+                        if (it.state != AudioRecord.STATE_INITIALIZED) {
+                            Log.e(Constants.TAG, "AudioRecord not initialized")
+                            return@let -1
                         }
+                        // Read exactly one interval's worth of audio.
+                        // AudioRecord.read() blocks until readSizeInBytes are available.
+                        it.read(audioData, 0, readSizeInBytes).also { bytes ->
+                            if (bytes < 0) {
+                                Log.e(Constants.TAG, "AudioRecord read error: $bytes")
+                            }
+                        }
+                    } ?: -1
+                }
+
+                if (bytesRead > 0) {
+                    consecutiveErrors = 0
+                    totalDataSize += bytesRead
+                    // Emit immediately — each read is one interval of audio
+                    emitAudioData(audioData, bytesRead)
+                } else if (bytesRead < 0) {
+                    consecutiveErrors++
+                    if (consecutiveErrors >= 10) {
+                        Log.e(Constants.TAG, "Too many consecutive read errors ($consecutiveErrors), stopping")
+                        emitRecordingError("READ_ERROR", "AudioRecord read failed after $consecutiveErrors consecutive errors")
+                        break
                     }
-                } ?: -1
+                }
             }
-            if (bytesRead > 0) {
-                totalDataSize += bytesRead
-                // Emit immediately — each read is one interval of audio
-                emitAudioData(audioData, bytesRead)
+        } catch (e: Exception) {
+            Log.e(Constants.TAG, "Recording thread crashed", e)
+            emitRecordingError("RECORDING_CRASH", e.message ?: "Recording thread unexpected error")
+        }
+    }
+
+    /**
+     * Sends a recording error event to JS so the caller can react.
+     */
+    private fun emitRecordingError(code: String, message: String) {
+        mainHandler.post {
+            try {
+                eventSender.sendExpoEvent(
+                    Constants.AUDIO_EVENT_NAME, bundleOf(
+                        "error" to code,
+                        "errorMessage" to message,
+                        "streamUuid" to streamUuid
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e(Constants.TAG, "Failed to send error event", e)
             }
         }
     }
