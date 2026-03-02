@@ -12,7 +12,6 @@ class SoundPlayer {
     // needed to track segments in progress in order to send playbackevents properly
     private var segmentsLeftToPlay: Int = 0
     private var isPlaying: Bool = false  // Tracks if audio is currently playing
-    private var isInterrupted: Bool = false
     public var isAudioEngineIsSetup: Bool = false
     
     // specific turnID to ignore sound events
@@ -314,19 +313,7 @@ class SoundPlayer {
             promise.resolve(nil)
         }
     }
-    
-    /// Interrupts audio playback
-    /// - Parameter promise: Promise to resolve when interrupted
-    func interrupt(_ promise: Promise) {
-        self.isInterrupted = true
-        self.stop(promise)
-    }
-    
-    /// Resumes audio playback after interruption
-    func resume() {
-        self.isInterrupted = false
-    }
-    
+
     /// Processes audio chunk based on common format
     /// - Parameters:
     ///   - base64String: Base64 encoded audio data
@@ -430,12 +417,8 @@ class SoundPlayer {
         rejecter: @escaping RCTPromiseRejectBlock,
         commonFormat: AVAudioCommonFormat = .pcmFormatFloat32
     ) throws {
-        Logger.debug("New play chunk \(self.isInterrupted)")
-        guard !self.isInterrupted else {
-            resolver(nil)
-            return
-        }
-        
+        Logger.debug("New play chunk")
+
         do {
             if !self.isAudioEngineIsSetup {
                 try ensureAudioEngineIsSetup()
@@ -583,8 +566,8 @@ class SoundPlayer {
                         }
                     }
                     
-                    // Recursively play the next chunk if not interrupted and queue is not empty
-                    if !self.isInterrupted && !self.audioQueue.isEmpty {
+                    // Recursively play the next chunk if queue is not empty
+                    if !self.audioQueue.isEmpty {
                         self.playNextInQueue()
                     }
                 }

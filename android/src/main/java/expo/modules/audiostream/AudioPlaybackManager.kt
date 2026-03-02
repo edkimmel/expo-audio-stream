@@ -58,7 +58,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
 
     private lateinit var audioTrack: AudioTrack
     private var isPlaying = false
-    private var isMuted = false
     private var currentTurnId: String? = null
     private var hasSentSoundStartedEvent = false
     private var segmentsLeftToPlay = 0
@@ -133,7 +132,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
             // Update the current turnId (this will reset flags if needed through setCurrentTurnId)
             setCurrentTurnId(turnId)
             
-            isMuted = false
             processingChannel.send(ChunkData(chunk, turnId, promise, encoding))
             ensureProcessingLoopStarted()
         }
@@ -174,7 +172,7 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
         processingJob =
             coroutineScope.launch {
                 for (chunkData in processingChannel) {
-                    Log.d("ExpoPlayStreamModule", "Received TurnId ${chunkData.turnId} and current id $currentTurnId and playback is Muted $isMuted")
+                    Log.d("ExpoPlayStreamModule", "Received TurnId ${chunkData.turnId} and current id $currentTurnId")
                     if (chunkData.turnId == currentTurnId) {
                         processAndEnqueueChunk(chunkData)
                     }
@@ -225,16 +223,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
             }
         } catch (e: Exception) {
             chunkData.promise.reject("ERR_PROCESSING_AUDIO", e.message, e)
-        }
-    }
-
-    fun setVolume(volume: Double, promise: Promise) {
-        val clampedVolume = max(0.0, min(volume, 100.0)) / 100.0
-        try {
-            audioTrack.setVolume(clampedVolume.toFloat())
-            promise.resolve(null)
-        } catch (e: Exception) {
-            promise.reject("ERR_SET_VOLUME", e.message, e)
         }
     }
 
