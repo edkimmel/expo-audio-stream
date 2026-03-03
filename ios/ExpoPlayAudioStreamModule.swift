@@ -298,7 +298,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
 
         let audioSession = AVAudioSession.sharedInstance()
         try audioSession.setCategory(
-            .playAndRecord, mode: .voiceChat,
+            .playAndRecord, mode: .videoChat,
             options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
         if let settings = recordingSettings {
             try audioSession.setPreferredSampleRate(settings.sampleRate)
