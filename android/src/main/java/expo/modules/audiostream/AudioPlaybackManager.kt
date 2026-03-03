@@ -61,9 +61,13 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
     private var currentTurnId: String? = null
     private var hasSentSoundStartedEvent = false
     private var segmentsLeftToPlay = 0
-    
+
     // Current sound configuration
     private var config: SoundConfig = SoundConfig.DEFAULT
+
+    // Whether the AudioTrack was created with PCM_FLOAT (true) or PCM_16BIT (false).
+    // Some device HALs don't support FLOAT output; we detect this at init and fall back.
+    private var trackUsesFloat: Boolean = true
     
     // Specific turnID to ignore sound events (similar to iOS)
     // Removed: private val suspendSoundEventTurnId: String = "suspend-sound-events"
@@ -74,19 +78,40 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
     }
 
     private fun initializeAudioTrack() {
-        val audioFormat =
-            AudioFormat.Builder()
-                .setSampleRate(config.sampleRate)
-                .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                .build()
+        // Try PCM_FLOAT first; fall back to PCM_16BIT if the HAL doesn't support it.
+        var encoding = AudioFormat.ENCODING_PCM_FLOAT
+        var minBufferSize = AudioTrack.getMinBufferSize(
+            config.sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            encoding
+        )
 
-        val minBufferSize =
-            AudioTrack.getMinBufferSize(
+        if (minBufferSize <= 0) {
+            Log.w("AudioPlaybackManager",
+                "getMinBufferSize returned $minBufferSize for PCM_FLOAT " +
+                "(sampleRate=${config.sampleRate}). Falling back to PCM_16BIT.")
+            encoding = AudioFormat.ENCODING_PCM_16BIT
+            minBufferSize = AudioTrack.getMinBufferSize(
                 config.sampleRate,
                 AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_FLOAT
+                encoding
             )
+            if (minBufferSize <= 0) {
+                // Last resort: calculate a 20 ms frame for 16-bit mono (2 bytes/sample)
+                Log.e("AudioPlaybackManager",
+                    "getMinBufferSize also failed for PCM_16BIT ($minBufferSize). " +
+                    "Using 20ms fallback buffer.")
+                minBufferSize = (config.sampleRate * 2) / 50
+            }
+        }
+
+        trackUsesFloat = (encoding == AudioFormat.ENCODING_PCM_FLOAT)
+
+        val audioFormat = AudioFormat.Builder()
+            .setSampleRate(config.sampleRate)
+            .setEncoding(encoding)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+            .build()
 
         // Configure audio attributes based on playback mode
         val audioAttributesBuilder = AudioAttributes.Builder()
@@ -109,6 +134,10 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
                 .setBufferSizeInBytes(minBufferSize * 2)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
+
+        Log.d("AudioPlaybackManager",
+            "AudioTrack created: encoding=${if (trackUsesFloat) "FLOAT" else "16BIT"}, " +
+            "sampleRate=${config.sampleRate}, bufferBytes=${minBufferSize * 2}")
     }
 
     private fun initializeChannels() {
@@ -127,8 +156,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
                 Log.d("ExpoPlayStreamModule", "Re-initializing channels")
                 initializeChannels()
             }
-            Log.d("ExpoPlayStreamModule", "PlayAudio input $turnId and current id $currentTurnId with encoding $encoding")
-            
             // Update the current turnId (this will reset flags if needed through setCurrentTurnId)
             setCurrentTurnId(turnId)
             
@@ -172,7 +199,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
         processingJob =
             coroutineScope.launch {
                 for (chunkData in processingChannel) {
-                    Log.d("ExpoPlayStreamModule", "Received TurnId ${chunkData.turnId} and current id $currentTurnId")
                     if (chunkData.turnId == currentTurnId) {
                         processAndEnqueueChunk(chunkData)
                     }
@@ -181,7 +207,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
                         break // Stop the loop if there's no more work to do
                     }
                 }
-                Log.d("ExpoPlayStreamModule", "Clear Processing JOB")
                 processingJob = null
             }
     }
@@ -215,10 +240,8 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
             
             // Increment the segments counter
             segmentsLeftToPlay++
-            Log.d("ExpoPlayStreamModule", "Chunk enqueued, segments waiting: $segmentsLeftToPlay for turnId: ${chunkData.turnId}")
 
             if (!isPlaying) {
-                Log.d("ExpoPlayStreamModule", "Start Playback")
                 startPlayback()
             }
         } catch (e: Exception) {
@@ -232,9 +255,7 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
                 if (::audioTrack.isInitialized && audioTrack.state != AudioTrack.STATE_UNINITIALIZED) {
                     audioTrack.play()
                     isPlaying = true
-                    Log.d("ExpoPlayStreamModule", "Starting Playback Loop")
                     startPlaybackLoop()
-                    Log.d("ExpoPlayStreamModule", "Ensure processing Loop Started in startPlayback")
                     ensureProcessingLoopStarted()
                 } else {
                     throw IllegalStateException("AudioTrack not initialized or in invalid state")
@@ -247,21 +268,17 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
     }
 
     fun stopPlayback(promise: Promise? = null) {
-        Log.d("ExpoPlayStreamModule", "Stopping playback")
         if (!isPlaying || playbackChannel.isEmpty ) {
             promise?.resolve(null)
-            Log.d("ExpoPlayStreamModule", "Nothing is played return")
             return
         }
         isPlaying = false
         coroutineScope.launch {
             try {
 
-                Log.d("ExpoPlayStreamModule", "Stopping audioTrack")
                 if (::audioTrack.isInitialized && audioTrack.state != AudioTrack.STATE_UNINITIALIZED) {
                     try {
                         audioTrack.stop()
-                        Log.d("ExpoPlayStreamModule", "Flushing audioTrack")
                         try {
                             audioTrack.flush()
                         } catch (e: Exception) {
@@ -272,47 +289,31 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
                         Log.e("ExpoPlayStreamModule", "Error stopping AudioTrack: ${e.message}", e)
                         // Continue with other cleanup operations
                     }
-                } else {
-                    Log.d("ExpoPlayStreamModule", "AudioTrack not initialized or in invalid state, skipping stop/flush")
                 }
                 // Safely cancel jobs
                 if (currentPlaybackJob != null) {
-                    Log.d("ExpoPlayStreamModule", "Cancelling currentPlaybackJob")
-                    currentPlaybackJob?.cancelAndJoin()  // Add logging here to trace progress
+                    currentPlaybackJob?.cancelAndJoin()
                     currentPlaybackJob = null
                 }
 
                 if (processingJob != null) {
-                    Log.d("ExpoPlayStreamModule", "Cancelling processingJob")
-                    processingJob?.cancelAndJoin()  // Add logging here to trace progress
+                    processingJob?.cancelAndJoin()
                     processingJob = null
                 }
 
                 // Resolve remaining promises in playbackChannel
-                Log.d("ExpoPlayStreamModule", "Resolving remaining promises in playbackChannel")
                 for (chunk in playbackChannel) {
-                    Log.d("ExpoPlayStreamModule", "New chunk $chunk")
                     if (!chunk.isPromiseSettled) {
                         chunk.isPromiseSettled = true
                         chunk.promise.resolve(null)
                     }
                 }
 
-                Log.d("ExpoPlayStreamModule", "Closing the channels")
-
                 if (!processingChannel.isClosedForSend) {
-                    Log.d("ExpoPlayStreamModule", "Closing processingChannel")
                     processingChannel.close()
-                } else {
-                    Log.d("ExpoPlayStreamModule", "Processing channel is already closed")
                 }
-
-                Log.d("ExpoPlayStreamModule", "Checking if playbackChannel is closed")
                 if (!playbackChannel.isClosedForSend) {
-                    Log.d("ExpoPlayStreamModule", "Closing playbackChannel")
                     playbackChannel.close()
-                } else {
-                    Log.d("ExpoPlayStreamModule", "Playback channel is already closed")
                 }
 
                 // Reset the sound started event flag
@@ -321,7 +322,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
                 // Reset the segments counter
                 segmentsLeftToPlay = 0
 
-                Log.d("ExpoPlayStreamModule", "Stopped")
                 promise?.resolve(null)
             } catch (e: CancellationException) {
                 Log.d("ExpoPlayStreamModule", "Stop playback was cancelled: ${e.message}")
@@ -355,19 +355,27 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
         withContext(Dispatchers.IO) {
             try {
                 val chunkSize = chunk.audioData.size
-                
-                Log.d("ExpoPlayStreamModule", "Playing chunk with $chunkSize frames")
 
                 suspendCancellableCoroutine { continuation ->
-                    // Write the audio data
-                    val written = audioTrack.write(
-                        chunk.audioData,
-                        0,
-                        chunkSize,
-                        AudioTrack.WRITE_BLOCKING
-                    )
-                    
-                    Log.d("ExpoPlayStreamModule", "Chunk written: $written frames")
+                    // Write the audio data — convert to shorts if the track is 16-bit
+                    val written = if (trackUsesFloat) {
+                        audioTrack.write(
+                            chunk.audioData,
+                            0,
+                            chunkSize,
+                            AudioTrack.WRITE_BLOCKING
+                        )
+                    } else {
+                        val shortData = ShortArray(chunkSize) { i ->
+                            (chunk.audioData[i].coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+                        }
+                        audioTrack.write(
+                            shortData,
+                            0,
+                            chunkSize,
+                            AudioTrack.WRITE_BLOCKING
+                        )
+                    }
                     
                     // Resolve the promise immediately after writing
                     // This lets the client know the data was accepted
@@ -385,7 +393,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
                     
                     // Calculate expected playback duration in milliseconds
                     val playbackDurationMs = (written.toFloat() / config.sampleRate * 1000).toLong()
-                    Log.d("ExpoPlayStreamModule", "Expected playback duration: ${playbackDurationMs}ms")
                     
                     // Store a reference to the delay job
                     val delayJob = coroutineScope.launch {
@@ -393,19 +400,15 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
                         // Wait for 50% of duration, but cap at 90% of duration to ensure loop continues reasonably quickly
                         val waitTime = (playbackDurationMs * 0.5).toLong().coerceAtMost((playbackDurationMs * 0.9).toLong()) // Keep early resume
                         delay(waitTime) // Wait for partial duration
-                        Log.d("ExpoPlayStreamModule", "Resuming continuation after ${waitTime}ms delay")
                         continuation.resumeWith(Result.success(Unit))
 
                         // Continue waiting in the background for the rest of the estimated duration
                         delay(playbackDurationMs - waitTime)
-                        Log.d("ExpoPlayStreamModule", "Playback of chunk likely completed after ${playbackDurationMs}ms")
                         // Signal that this chunk has finished playing asynchronously
                         handleChunkCompletion(chunk)
                     }
                     
                     continuation.invokeOnCancellation {
-                        Log.d("ExpoPlayStreamModule", "Playback cancelled")
-                        
                         // Cancel the delay job to prevent it from resuming the continuation
                         delayJob.cancel()
                         
@@ -438,13 +441,11 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
     private fun handleChunkCompletion(chunk: AudioChunk) {
         coroutineScope.launch { // Launch on default dispatcher for safety
             segmentsLeftToPlay = (segmentsLeftToPlay - 1).coerceAtLeast(0)
-            Log.d("ExpoPlayStreamModule", "Chunk finished playback (estimated), segments left: $segmentsLeftToPlay for turnId: ${chunk.turnId}")
 
             // Check if this was the last chunk for the current turn ID and the queue is empty
             val isFinalChunk = segmentsLeftToPlay == 0 && playbackChannel.isEmpty && chunk.turnId == currentTurnId
 
             if (isFinalChunk && chunk.turnId != SUSPEND_SOUND_EVENT_TURN_ID) {
-                Log.d("ExpoPlayStreamModule", "Sending FINAL SoundChunkPlayed event")
                 sendSoundChunkPlayedEvent(isFinal = true)
                 // Reset the flag after the final chunk event for this turn is sent
                 hasSentSoundStartedEvent = false
@@ -456,7 +457,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
      * Sends the SoundStarted event to JavaScript
      */
     private fun sendSoundStartedEvent() {
-        Log.d("ExpoPlayStreamModule", "Sending SoundStarted event")
         eventSender?.sendExpoEvent(Constants.SOUND_STARTED_EVENT_NAME, Bundle())
     }
 
@@ -465,7 +465,6 @@ class AudioPlaybackManager(private val eventSender: EventSender? = null) {
      * @param isFinal Boolean indicating if this is the final chunk in the playback sequence
      */
     private fun sendSoundChunkPlayedEvent(isFinal: Boolean) {
-        Log.d("ExpoPlayStreamModule", "Sending SoundChunkPlayed event with isFinal=$isFinal")
         val params = Bundle()
         params.putBoolean("isFinal", isFinal)
         eventSender?.sendExpoEvent(Constants.SOUND_CHUNK_PLAYED_EVENT_NAME, params)

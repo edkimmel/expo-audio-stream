@@ -24,10 +24,12 @@ class PipelineIntegration: PipelineListener {
     static let EVENT_AUDIO_FOCUS_RESUMED = "PipelineAudioFocusResumed"
 
     private weak var eventSender: PipelineEventSender?
+    private weak var sharedEngine: SharedAudioEngine?
     private var pipeline: AudioPipeline?
 
-    init(eventSender: PipelineEventSender) {
+    init(eventSender: PipelineEventSender, sharedEngine: SharedAudioEngine) {
         self.eventSender = eventSender
+        self.sharedEngine = sharedEngine
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -46,6 +48,11 @@ class PipelineIntegration: PipelineListener {
         // Tear down any existing pipeline first
         pipeline?.disconnect()
 
+        guard let sharedEngine = sharedEngine else {
+            throw NSError(domain: "PipelineIntegration", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "SharedAudioEngine not set"])
+        }
+
         let sampleRate = (options["sampleRate"] as? NSNumber)?.intValue ?? 24000
         let channelCount = (options["channelCount"] as? NSNumber)?.intValue ?? 1
         let targetBufferMs = (options["targetBufferMs"] as? NSNumber)?.intValue ?? 80
@@ -54,6 +61,7 @@ class PipelineIntegration: PipelineListener {
             sampleRate: sampleRate,
             channelCount: channelCount,
             targetBufferMs: targetBufferMs,
+            sharedEngine: sharedEngine,
             listener: self
         )
         p.connect()
@@ -136,8 +144,28 @@ class PipelineIntegration: PipelineListener {
         return pipeline?.getState().rawValue ?? PipelineState.idle.rawValue
     }
 
+    /// Register the pipeline as a delegate on the shared engine.
+    /// Called by the module after connect() so route changes and interruptions
+    /// are forwarded to the AudioPipeline instance.
+    func setAsActiveDelegate(on engine: SharedAudioEngine) {
+        if let p = pipeline {
+            engine.addDelegate(p)
+        }
+    }
+
+    /// Remove the pipeline delegate from the shared engine.
+    /// Called by the module before disconnect so stale callbacks aren't delivered.
+    func removeAsDelegate(from engine: SharedAudioEngine) {
+        if let p = pipeline {
+            engine.removeDelegate(p)
+        }
+    }
+
     /// Destroy the integration — called from module destroy().
     func destroy() {
+        if let p = pipeline, let engine = sharedEngine {
+            engine.removeDelegate(p)
+        }
         pipeline?.disconnect()
         pipeline = nil
     }

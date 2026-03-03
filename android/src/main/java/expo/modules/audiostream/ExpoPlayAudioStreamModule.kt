@@ -54,11 +54,16 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
 
     private val audioCallCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+            val descriptions = addedDevices?.map { "${it.productName} (type=${it.type})" } ?: emptyList()
+            Log.d("ExpoAudioCallback", "onAudioDevicesAdded: $descriptions")
+
             val firstOfGroup = addedDevices?.filter { d ->
                 d.type in interestingTypes && reportedGroups.add(groupKey(d.type))
             }
             if (firstOfGroup?.isNotEmpty()==true) {
-                Log.d("ExpoAudioCallback",  "AudioDeviceCallback ➜ ADDED")
+                val matched = firstOfGroup.map { "${it.productName} (type=${it.type})" }
+                Log.d("ExpoAudioCallback", "AudioDeviceCallback ➜ ADDED (interesting): $matched")
+                pipelineIntegration.logAudioTrackHealth("device_added")
                 val params = Bundle()
                 params.putString("reason", "newDeviceAvailable")
                 sendExpoEvent(Constants.DEVICE_RECONNECTED_EVENT_NAME, params)
@@ -66,11 +71,16 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         }
 
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+            val descriptions = removedDevices?.map { "${it.productName} (type=${it.type})" } ?: emptyList()
+            Log.d("ExpoAudioCallback", "onAudioDevicesRemoved: $descriptions")
+
             val lastOfGroup = removedDevices?.filter { d ->
                 d.type in interestingTypes && reportedGroups.remove(groupKey(d.type))
             }
             if (lastOfGroup?.isNotEmpty() == true) {
-                Log.d("ExpoAudioCallback", "AudioDeviceCallback ➜ REMOVED")
+                val matched = lastOfGroup.map { "${it.productName} (type=${it.type})" }
+                Log.d("ExpoAudioCallback", "AudioDeviceCallback ➜ REMOVED (interesting): $matched")
+                pipelineIntegration.logAudioTrackHealth("device_removed")
                 audioPlaybackManager.stopPlayback(null)
                 val params = Bundle()
                 params.putString("reason", "oldDeviceUnavailable")

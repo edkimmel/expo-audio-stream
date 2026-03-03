@@ -3,7 +3,7 @@ import {
   ExpoPlayAudioStream,
   Pipeline,
 } from "@edkimmel/expo-audio-stream";
-import { useEffect, useRef, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import { sampleA } from "./samples/sample-a";
 import { sampleB } from "./samples/sample-b";
 import type {
@@ -23,8 +23,24 @@ const SAMPLE_PLAYBACK_RATE = 16000;
 const turnId1 = "turnId1";
 const turnId2 = "turnId2";
 
+const chaosMonkey = () => {
+  // At random, frequent intervals, busy wait the JS thread for 100-200ms to see how audio playback and pipeline handle JS thread starvation
+  return setInterval(() => {
+    const now = Date.now();
+    const busyTime = 100 + Math.random() * 100;
+    while (Date.now() - now < busyTime) {
+      // Busy wait
+    }
+    console.log(`Chaos monkey busy wait for ${Math.round(busyTime)}ms`);
+  }, 500);
+}
+
 export default function App() {
   const [pipelineState, setPipelineState] = useState<string>("idle");
+  const [pipelineError, setPipelineError] = useState<{
+    code: string;
+    message: string;
+  } | null>(null);
   const [isRecording, setIsRecording] = useState(false);
 
   const eventListenerSubscriptionRef = useRef<EventSubscription | undefined>(
@@ -32,6 +48,21 @@ export default function App() {
   );
 
   const pipelineSubsRef = useRef<{ remove: () => void }[]>([]);
+
+  const chaosTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+
+  const startChaosMonkey = () => {
+    if (!chaosTimeoutRef.current) {
+      chaosTimeoutRef.current = chaosMonkey();
+    }
+  };
+
+  const stopChaosMonkey = () => {
+    if (chaosTimeoutRef.current) {
+      clearInterval(chaosTimeoutRef.current);
+      chaosTimeoutRef.current = undefined;
+    }
+  };
 
   const onAudioCallback = async (audio: AudioDataEvent) => {
     const nowMilliseconds = Date.now() % 1000;
@@ -53,11 +84,17 @@ export default function App() {
   }, []);
 
   const connectPipeline = async () => {
+    setPipelineError(null);
     try {
+      await ExpoPlayAudioStream.setSoundConfig({
+        sampleRate: SAMPLE_PLAYBACK_RATE,
+        playbackMode: "conversation",
+      });
       const result = await Pipeline.connect({
         sampleRate: SAMPLE_PLAYBACK_RATE,
         channelCount: 1,
         targetBufferMs: 80,
+        playbackMode: "conversation",
       });
       console.log("Pipeline connected:", result);
 
@@ -88,8 +125,20 @@ export default function App() {
         }
       );
 
-      const errorSub = Pipeline.onError((err) => {
+      const errorSub = Pipeline.onError(async (err) => {
         console.error(`Pipeline error: ${err.code} - ${err.message}`);
+        if (err.code === "ENGINE_DIED") {
+          setPipelineError(err);
+          // Auto-disconnect to clean up all state
+          try {
+            await Pipeline.disconnect();
+          } catch (_) {
+            // Already torn down on native side, ignore
+          }
+          pipelineSubsRef.current.forEach((s) => s.remove());
+          pipelineSubsRef.current = [];
+          setPipelineState("idle");
+        }
       });
 
       const focusSub = Pipeline.onAudioFocus((e) => {
@@ -146,6 +195,13 @@ export default function App() {
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.header}>expo-audio-stream</Text>
+
+      {/* ── Chaos Monkey ─────────────────────────────────── */}
+      <Text style={styles.section}>Chaos</Text>
+      <Button onPress={startChaosMonkey} title="Start Chaos Monkey" />
+      <Spacer />
+      <Button onPress={stopChaosMonkey} title="Stop Chaos Monkey" />
+      <Spacer />
 
       {/* ── Sound Playback ──────────────────────────────── */}
       <Text style={styles.section}>Sound Playback</Text>
@@ -263,6 +319,21 @@ export default function App() {
       <Button onPress={disconnectPipeline} title="Disconnect Pipeline" />
 
       <Text style={styles.status}>Pipeline: {pipelineState}</Text>
+
+      {pipelineError && (
+        <View style={styles.errorBanner}>
+          <Text style={styles.errorTitle}>Audio Engine Error</Text>
+          <Text style={styles.errorMessage}>
+            {pipelineError.code}: {pipelineError.message}
+          </Text>
+          <Spacer />
+          <Button
+            onPress={connectPipeline}
+            title="Reconnect Pipeline"
+            color="#fff"
+          />
+        </View>
+      )}
     </ScrollView>
   );
 }
@@ -297,6 +368,25 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontSize: 13,
     color: "#666",
+  },
+  errorBanner: {
+    marginTop: 20,
+    backgroundColor: "#d32f2f",
+    borderRadius: 8,
+    padding: 16,
+    alignSelf: "stretch",
+    alignItems: "center",
+  },
+  errorTitle: {
+    color: "#fff",
+    fontWeight: "bold",
+    fontSize: 15,
+    marginBottom: 4,
+  },
+  errorMessage: {
+    color: "#ffcdd2",
+    fontSize: 12,
+    textAlign: "center",
   },
 });
 

@@ -52,6 +52,7 @@ export class ExpoPlayAudioStream {
   }
 
   /**
+   * @deprecated Use the `Pipeline` class for more efficient audio streaming with better error handling and telemetry.
    * Plays a sound.
    * @param {string} audio - The audio to play.
    * @param {string} turnId - The turn ID.
@@ -77,6 +78,7 @@ export class ExpoPlayAudioStream {
   }
 
   /**
+   * @deprecated Use the `Pipeline` class for more efficient audio streaming with better error handling and telemetry.
    * Stops the currently playing sound.
    * @returns {Promise<void>}
    * @throws {Error} If the sound fails to stop.
@@ -91,6 +93,7 @@ export class ExpoPlayAudioStream {
   }
 
   /**
+   * @deprecated Use the `Pipeline` class for more efficient audio streaming with better error handling and telemetry.
    * Clears the sound queue by turn ID.
    * @param {string} turnId - The turn ID.
    * @returns {Promise<void>}

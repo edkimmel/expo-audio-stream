@@ -2,6 +2,8 @@
 // Native Audio Pipeline — V3 TypeScript Types
 // ────────────────────────────────────────────────────────────────────────────
 
+import { PlaybackMode } from "../types";
+
 // ── Connect ─────────────────────────────────────────────────────────────────
 
 /** Options passed to `connectPipeline()`. */
@@ -15,6 +17,10 @@ export interface ConnectPipelineOptions {
    * priming gate opens and audio begins playing (default 80).
    */
   targetBufferMs?: number;
+  /**
+   * Playback mode hint for native optimizations. Affects thread priority and
+   */
+  playbackMode?: PlaybackMode;
 }
 
 /** Result returned from a successful `connectPipeline()` call. */

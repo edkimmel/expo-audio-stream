@@ -108,11 +108,22 @@ class AudioPipeline(
         else AudioFormat.CHANNEL_OUT_STEREO
 
     /** Minimum buffer size in bytes reported by the device HAL. */
-    private val minBufferBytes = AudioTrack.getMinBufferSize(
-        sampleRate,
-        channelMask,
-        AudioFormat.ENCODING_PCM_16BIT
-    )
+    private val minBufferBytes: Int = run {
+        val size = AudioTrack.getMinBufferSize(
+            sampleRate,
+            channelMask,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        if (size <= 0) {
+            Log.e(TAG, "getMinBufferSize returned $size " +
+                "(sampleRate=$sampleRate, channels=$channelCount). " +
+                "Falling back to 20ms frame.")
+            // Fallback: 20ms worth of 16-bit samples
+            (sampleRate * channelCount * 2) / 50  // 2 bytes per sample, 50 = 1000/20
+        } else {
+            size
+        }
+    }
 
     /** Number of 16-bit samples per "frame" (one HAL buffer). */
     val frameSizeSamples: Int = minBufferBytes / 2   // 2 bytes per short
@@ -133,6 +144,9 @@ class AudioPipeline(
     @Volatile private var currentTurnId: String? = null
     @Volatile private var isFirstChunkOfTurn = true
     @Volatile private var playbackStartedForTurn = false
+
+    /** Set by pushAudio on first chunk; consumed by writeLoop to flush stale silence from AudioTrack. */
+    private val pendingFlush = AtomicBoolean(false)
 
     // ── Audio focus ─────────────────────────────────────────────────────
     private val audioManager: AudioManager =
@@ -222,6 +236,9 @@ class AudioPipeline(
                 .build()
 
             audioTrack!!.play()
+            Log.d(TAG, "AudioTrack created and started — playState=${audioTrack!!.playState}, " +
+                    "state=${audioTrack!!.state}, sampleRate=$sampleRate, " +
+                    "bufferBytes=$trackBufferBytes, minBufferBytes=$minBufferBytes")
 
             // ── 3. Audio focus ──────────────────────────────────────────
             requestAudioFocus()
@@ -336,6 +353,9 @@ class AudioPipeline(
                 this.isFirstChunkOfTurn = true
                 playbackStartedForTurn = false
                 lastReportedUnderrunCount = 0
+                // Signal write loop to flush stale silence from AudioTrack
+                // so real audio plays immediately without waiting behind queued silence.
+                pendingFlush.set(true)
                 setState(PipelineState.STREAMING)
             }
 
@@ -413,12 +433,22 @@ class AudioPipeline(
     // ════════════════════════════════════════════════════════════════════
 
     private fun writeLoop() {
-        Log.d(TAG, "Write thread started")
+        Log.d(TAG, "Write thread started — frameSizeSamples=$frameSizeSamples, trackBufferBytes=$trackBufferBytes")
         val frame = ShortArray(frameSizeSamples)
 
         while (running.get()) {
             val track = audioTrack ?: break
             val buf = jitterBuffer ?: break
+
+            // Flush stale silence from AudioTrack when a new turn starts.
+            // This prevents the real audio from queuing behind silence frames
+            // that were written while idle.
+            if (pendingFlush.compareAndSet(true, false)) {
+                Log.d(TAG, "Flushing AudioTrack for new turn (head=${track.playbackHeadPosition})")
+                track.pause()
+                track.flush()
+                track.play()
+            }
 
             // Read from jitter buffer (silence if not primed or underrun)
             buf.read(frame)
@@ -433,9 +463,17 @@ class AudioPipeline(
                 val written = track.write(frame, 0, frame.size, AudioTrack.WRITE_BLOCKING)
 
                 if (written < 0) {
-                    Log.e(TAG, "AudioTrack.write returned error: $written")
+                    val errorName = when (written) {
+                        AudioTrack.ERROR_INVALID_OPERATION -> "ERROR_INVALID_OPERATION"
+                        AudioTrack.ERROR_BAD_VALUE -> "ERROR_BAD_VALUE"
+                        AudioTrack.ERROR_DEAD_OBJECT -> "ERROR_DEAD_OBJECT"
+                        AudioTrack.ERROR -> "ERROR"
+                        else -> "UNKNOWN($written)"
+                    }
+                    Log.e(TAG, "AudioTrack.write returned error: $errorName ($written), " +
+                            "playState=${track.playState}, trackState=${track.state}")
                     setState(PipelineState.ERROR)
-                    listener.onError("WRITE_ERROR", "AudioTrack.write returned $written")
+                    listener.onError("WRITE_ERROR", "AudioTrack.write returned $errorName ($written)")
                     break
                 }
             } catch (e: IllegalStateException) {
@@ -524,7 +562,9 @@ class AudioPipeline(
                     if (stalledMs >= ZOMBIE_STALL_THRESHOLD_MS &&
                         (state == PipelineState.STREAMING || state == PipelineState.DRAINING)
                     ) {
-                        Log.w(TAG, "Zombie AudioTrack detected! head=$head stalledMs=$stalledMs")
+                        Log.w(TAG, "Zombie AudioTrack detected! head=$head stalledMs=$stalledMs " +
+                                "playState=${track.playState} trackState=${track.state} " +
+                                "writeLoops=${totalWriteLoops.get()}")
                         listener.onZombieDetected(head, stalledMs)
                         // Reset the timer so we don't spam
                         lastHeadChangeTime = now
@@ -581,6 +621,44 @@ class AudioPipeline(
             }
         }
         volumeObserver = null
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Diagnostics (called from device callback via PipelineIntegration)
+    // ════════════════════════════════════════════════════════════════════
+
+    /**
+     * Snapshot AudioTrack state at the moment of a route change.
+     * This tells us whether the track survives the switch or silently dies.
+     */
+    fun logTrackHealth(trigger: String) {
+        val track = audioTrack
+        if (track == null) {
+            Log.d(TAG, "[$trigger] AudioTrack health: track is null (pipeline not connected)")
+            return
+        }
+
+        val playState = when (track.playState) {
+            AudioTrack.PLAYSTATE_STOPPED -> "STOPPED"
+            AudioTrack.PLAYSTATE_PAUSED -> "PAUSED"
+            AudioTrack.PLAYSTATE_PLAYING -> "PLAYING"
+            else -> "UNKNOWN(${track.playState})"
+        }
+        val trackState = when (track.state) {
+            AudioTrack.STATE_UNINITIALIZED -> "UNINITIALIZED"
+            AudioTrack.STATE_INITIALIZED -> "INITIALIZED"
+            AudioTrack.STATE_NO_STATIC_DATA -> "NO_STATIC_DATA"
+            else -> "UNKNOWN(${track.state})"
+        }
+        val head = track.playbackHeadPosition
+        val buf = jitterBuffer
+        val bufMs = buf?.bufferedMs() ?: -1
+        val bufPrimed = buf?.isPrimed() ?: false
+
+        Log.d(TAG, "[$trigger] AudioTrack health: playState=$playState, trackState=$trackState, " +
+                "head=$head, pipelineState=${state.value}, running=${running.get()}, " +
+                "bufferMs=$bufMs, primed=$bufPrimed, audioFocusLost=${audioFocusLost.get()}, " +
+                "writeLoops=${totalWriteLoops.get()}")
     }
 
     // ════════════════════════════════════════════════════════════════════

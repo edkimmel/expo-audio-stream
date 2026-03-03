@@ -238,6 +238,14 @@ class PipelineIntegration(
     }
 
     /**
+     * Log AudioTrack health — called from the device callback to capture
+     * track state at the moment of a route change.
+     */
+    fun logAudioTrackHealth(trigger: String) {
+        pipeline?.logTrackHealth(trigger) ?: Log.d(TAG, "logAudioTrackHealth($trigger) — no pipeline connected")
+    }
+
+    /**
      * Destroy the integration — called from OnDestroy / destroy().
      */
     fun destroy() {

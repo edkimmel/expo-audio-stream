@@ -13,6 +13,9 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
     private var _soundPlayer: SoundPlayer?
     private var _pipelineIntegration: PipelineIntegration?
 
+    /// Single shared AVAudioEngine used by both SoundPlayer and AudioPipeline.
+    private let sharedAudioEngine = SharedAudioEngine()
+
     private var microphone: Microphone {
         if _microphone == nil {
             _microphone = Microphone()
@@ -25,13 +28,14 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
         if _soundPlayer == nil {
             _soundPlayer = SoundPlayer()
             _soundPlayer?.delegate = self
+            _soundPlayer?.setSharedEngine(sharedAudioEngine)
         }
         return _soundPlayer!
     }
 
     private var pipelineIntegration: PipelineIntegration {
         if _pipelineIntegration == nil {
-            _pipelineIntegration = PipelineIntegration(eventSender: self)
+            _pipelineIntegration = PipelineIntegration(eventSender: self, sharedEngine: sharedAudioEngine)
         }
         return _pipelineIntegration!
     }
@@ -65,6 +69,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
         Function("destroy") {
             self._pipelineIntegration?.destroy()
             self._pipelineIntegration = nil
+            self.sharedAudioEngine.teardown()
             if self.isAudioSessionInitialized {
                 let audioSession = AVAudioSession.sharedInstance()
                 try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
@@ -107,6 +112,12 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             do {
                 if !isAudioSessionInitialized {
                     try ensureAudioSessionInitialized()
+                }
+
+                // Ensure shared engine is configured (playSound may be called without setSoundConfig)
+                if !self.sharedAudioEngine.isConfigured {
+                    try self.sharedAudioEngine.configure(playbackMode: .regular)
+                    self.sharedAudioEngine.addDelegate(self.soundPlayer)
                 }
 
                 // Determine the audio format based on the encoding parameter
@@ -213,8 +224,10 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
                 }
 
                 if useDefault {
-                    // Reset to default configuration
+                    // Reset to default configuration — configure engine for regular mode
                     Logger.debug("[ExpoPlayAudioStreamModule] Resetting sound configuration to default values")
+                    try self.sharedAudioEngine.configure(playbackMode: .regular)
+                    self.sharedAudioEngine.addDelegate(self.soundPlayer)
                     try soundPlayer.resetConfigToDefault()
                 } else {
                     // Extract configuration values from the provided dictionary
@@ -232,10 +245,14 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
                         playbackMode = .regular
                     }
 
+                    // Configure shared engine first (handles voice processing)
+                    try self.sharedAudioEngine.configure(playbackMode: playbackMode)
+                    self.sharedAudioEngine.addDelegate(self.soundPlayer)
+
                     // Create a new SoundConfig object
                     let soundConfig = SoundConfig(sampleRate: sampleRate, playbackMode: playbackMode)
 
-                    // Update the sound player configuration
+                    // Update the sound player configuration (attaches node to shared engine)
                     Logger.debug("[ExpoPlayAudioStreamModule] Setting sound configuration - sampleRate: \(sampleRate), playbackMode: \(playbackModeString)")
                     try soundPlayer.updateConfig(soundConfig)
                 }
@@ -250,7 +267,30 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
 
         AsyncFunction("connectPipeline") { (options: [String: Any], promise: Promise) in
             do {
+                if !self.isAudioSessionInitialized {
+                    try self.ensureAudioSessionInitialized()
+                }
+
+                // Parse playback mode from options to configure shared engine
+                let playbackModeString = options["playbackMode"] as? String ?? "regular"
+                let playbackMode: PlaybackMode
+                switch playbackModeString {
+                case "voiceProcessing":
+                    playbackMode = .voiceProcessing
+                case "conversation":
+                    playbackMode = .conversation
+                default:
+                    playbackMode = .regular
+                }
+
+                // Configure shared engine (handles voice processing)
+                try self.sharedAudioEngine.configure(playbackMode: playbackMode)
+
                 let result = try self.pipelineIntegration.connect(options: options)
+
+                // Set the AudioPipeline as the active delegate for route/interruption callbacks
+                self.pipelineIntegration.setAsActiveDelegate(on: self.sharedAudioEngine)
+
                 promise.resolve(result)
             } catch {
                 promise.reject("PIPELINE_CONNECT_ERROR", error.localizedDescription)
@@ -271,6 +311,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
         }
 
         AsyncFunction("disconnectPipeline") { (promise: Promise) in
+            self.pipelineIntegration.removeAsDelegate(from: self.sharedAudioEngine)
             self.pipelineIntegration.disconnect()
             promise.resolve(nil)
         }

@@ -1,122 +1,157 @@
 import AVFoundation
 import ExpoModulesCore
 
-class SoundPlayer {
+class SoundPlayer: SharedAudioEngineDelegate {
     weak var delegate: SoundPlayerDelegate?
-    private var audioEngine: AVAudioEngine!
     private var audioPlayerNode: AVAudioPlayerNode!
-    
+    private weak var sharedEngine: SharedAudioEngine?
+
     private let bufferAccessQueue = DispatchQueue(label: "com.expoaudiostream.bufferAccessQueue")
-    
+
     private var audioQueue: [(buffer: AVAudioPCMBuffer, promise: RCTPromiseResolveBlock, turnId: String)] = []  // Queue for audio segments
     // needed to track segments in progress in order to send playbackevents properly
     private var segmentsLeftToPlay: Int = 0
     private var isPlaying: Bool = false  // Tracks if audio is currently playing
     public var isAudioEngineIsSetup: Bool = false
-    
+
     // specific turnID to ignore sound events
     internal let suspendSoundEventTurnId: String = "suspend-sound-events"
-    
+
     // Debounce mechanism for isFinal signal - prevents premature isFinal when chunks arrive with network latency
     private var pendingFinalWorkItem: DispatchWorkItem?
     private let finalDebounceDelay: TimeInterval = 0.8  // 800ms for smooth debounce
-  
+
     private var audioPlaybackFormat: AVAudioFormat!
     private var config: SoundConfig
-    
+
     init(config: SoundConfig = SoundConfig()) {
         self.config = config
         self.audioPlaybackFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: config.sampleRate, channels: 1, interleaved: false)
-        
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleRouteChange),
-            name: AVAudioSession.routeChangeNotification,
-            object: nil
-        )
     }
-    
-    /// Handles audio route changes (e.g. headphones connected/disconnected)
-    /// - Parameter notification: The notification object containing route change information
-    @objc private func handleRouteChange(notification: Notification) {
-        guard let info = notification.userInfo,
-              let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
-              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
-            return
-        }
-        
-        Logger.debug("[SoundPlayer] Route is changed \(reason)")
 
-        switch reason {
-        case .newDeviceAvailable, .oldDeviceUnavailable:
-            if let node = audioPlayerNode, node.isPlaying {
-                node.pause()
-                node.stop()
-            }
-            
-            do {
-                try self.ensureAudioEngineIsSetup()
-            } catch {
-                Logger.debug("[SoundPlayer] Failed to setup audio engine: \(error.localizedDescription)")
-            }
-            self.delegate?.onDeviceReconnected(reason)
-        case .categoryChange:
-            Logger.debug("[SoundPlayer] Audio Session category changed")
-        default:
-            break
-        }
+    /// Set the shared audio engine reference. Called by the module after creation.
+    func setSharedEngine(_ engine: SharedAudioEngine) {
+        self.sharedEngine = engine
     }
     
-    /// Detaches and cleans up the existing audio player node from the engine
+    // ── SharedAudioEngineDelegate ────────────────────────────────────────
+
+    func engineDidRestartAfterRouteChange() {
+        Logger.debug("[SoundPlayer] Engine restarted after route change")
+        // Node has already been re-attached and played by SharedAudioEngine.
+        // Notify delegate so JS layer knows about the route change.
+        self.delegate?.onDeviceReconnected(.newDeviceAvailable)
+
+        // Re-trigger playback if there are still queued buffers.
+        // The scheduling chain was broken when the node was stopped during rebuild.
+        self.bufferAccessQueue.async { [weak self] in
+            guard let self = self else { return }
+            if !self.audioQueue.isEmpty {
+                Logger.debug("[SoundPlayer] Re-scheduling \(self.audioQueue.count) queued buffers after route change")
+                self.playNextInQueue()
+            }
+        }
+    }
+
+    func engineDidRebuild() {
+        Logger.debug("[SoundPlayer] Engine rebuilt — creating fresh node")
+        // Old node is invalid. Nil it out and set up a fresh one.
+        self.audioPlayerNode = nil
+        self.isAudioEngineIsSetup = false
+
+        do {
+            try ensureAudioEngineIsSetup()
+            Logger.debug("[SoundPlayer] Fresh node attached after rebuild")
+        } catch {
+            Logger.debug("[SoundPlayer] Failed to create fresh node after rebuild: \(error)")
+            // Fall through — next play() call will retry ensureAudioEngineIsSetup
+        }
+
+        // Notify JS about the route change
+        self.delegate?.onDeviceReconnected(.newDeviceAvailable)
+
+        // Re-trigger playback if there are still queued buffers
+        self.bufferAccessQueue.async { [weak self] in
+            guard let self = self else { return }
+            if !self.audioQueue.isEmpty {
+                Logger.debug("[SoundPlayer] Re-scheduling \(self.audioQueue.count) queued buffers after rebuild")
+                self.playNextInQueue()
+            }
+        }
+    }
+
+    func audioSessionInterruptionBegan() {
+        Logger.debug("[SoundPlayer] Audio session interruption began")
+        // Nothing specific needed — playback buffers just won't produce sound.
+    }
+
+    func audioSessionInterruptionEnded() {
+        Logger.debug("[SoundPlayer] Audio session interruption ended")
+        // Engine already restarted by SharedAudioEngine. Node re-started.
+        // If there are queued buffers, playback continues automatically.
+    }
+
+    func engineDidDie(reason: String) {
+        Logger.debug("[SoundPlayer] Engine died: \(reason)")
+        // Clear our node reference — engine is already torn down.
+        self.audioPlayerNode = nil
+        self.isAudioEngineIsSetup = false
+
+        // Clear queued buffers and notify JS
+        self.bufferAccessQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.pendingFinalWorkItem?.cancel()
+            self.pendingFinalWorkItem = nil
+            self.audioQueue.removeAll()
+            self.segmentsLeftToPlay = 0
+        }
+
+        // Notify JS layer about the device issue
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.onDeviceReconnected(.oldDeviceUnavailable)
+        }
+    }
+
+    /// Detaches and cleans up the existing audio player node from the shared engine
     private func detachOldAvNodesFromEngine() {
         Logger.debug("[SoundPlayer] Detaching old audio node")
         guard let playerNode = self.audioPlayerNode else { return }
 
-        // Stop and detach the node
-        if playerNode.isPlaying {
-            Logger.debug("[SoundPlayer] Destroying audio node, player is playing, stopping it")
-            playerNode.stop()
-        }
-        self.audioEngine.disconnectNodeOutput(playerNode)
-        self.audioEngine.detach(playerNode)
+        sharedEngine?.detachNode(playerNode)
 
         // Set to nil, ARC deallocates it if no other references exist
         self.audioPlayerNode = nil
     }
     
-    /// Updates the audio configuration and reconfigures the audio engine
+    /// Updates the audio configuration and re-attaches the player node with the new format.
+    ///
+    /// Engine reconfiguration (for playbackMode changes) is handled by the module
+    /// via `SharedAudioEngine.configure()` before calling this method.
+    ///
     /// - Parameter newConfig: The new configuration to apply
-    /// - Throws: Error if audio engine setup fails
+    /// - Throws: Error if node setup fails
     public func updateConfig(_ newConfig: SoundConfig) throws {
         Logger.debug("[SoundPlayer] Updating configuration - sampleRate: \(newConfig.sampleRate), playbackMode: \(newConfig.playbackMode)")
-        
+
         // Check if anything has changed
         let configChanged = newConfig.sampleRate != self.config.sampleRate ||
                            newConfig.playbackMode != self.config.playbackMode
-        
+
         guard configChanged else {
             Logger.debug("[SoundPlayer] Configuration unchanged, skipping update")
             return
         }
-        
-        // Stop playback if active
-        if let playerNode = self.audioPlayerNode, playerNode.isPlaying {
-            playerNode.stop()
-        }
-        
-        // Stop and reset engine if running
-        if let engine = self.audioEngine, engine.isRunning {
-            engine.stop()
-            self.detachOldAvNodesFromEngine()
-        }
-        
+
+        // Detach existing node
+        self.detachOldAvNodesFromEngine()
+
         // Update configuration
         self.config = newConfig
-        
+
         // Update format with new sample rate
         self.audioPlaybackFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: newConfig.sampleRate, channels: 1, interleaved: false)
-        
-        // Reconfigure audio engine
+
+        // Attach a fresh node with the new format
         try self.ensureAudioEngineIsSetup()
     }
     
@@ -127,121 +162,24 @@ class SoundPlayer {
         try updateConfig(SoundConfig.defaultConfig)
     }
     
-    /// Enables voice processing on the audio engine
-    /// - Throws: Error if enabling voice processing fails
-    private func enableVoiceProcessing() throws {
-        guard let engine = self.audioEngine else { 
-            Logger.debug("[SoundPlayer] No audio engine available")
-            return 
-        }
-        
-        // Check current state to avoid redundant calls
-        let inputEnabled = engine.inputNode.isVoiceProcessingEnabled
-        let outputEnabled = engine.outputNode.isVoiceProcessingEnabled
-        
-        var hasChanges = false
-        
-        // Only enable if not already enabled
-        if !inputEnabled {
-            do {
-                try engine.inputNode.setVoiceProcessingEnabled(true)
-                hasChanges = true
-            } catch {
-                Logger.debug("[SoundPlayer] Failed to enable voice processing on input node: \(error)")
-                // Continue with output node setup despite this error
-            }
-        }
-        
-        if !outputEnabled {
-            do {
-                try engine.outputNode.setVoiceProcessingEnabled(true)
-                hasChanges = true
-            } catch {
-                Logger.debug("[SoundPlayer] Failed to enable voice processing on output node: \(error)")
-                // This error isn't fatal, so we'll continue
-            }
-        }
-        
-        if hasChanges {
-            Logger.debug("[SoundPlayer] Voice processing enabled")
-        } else {
-            Logger.debug("[SoundPlayer] Voice processing was already enabled")
-        }
-    }
-    
-    /// Disables voice processing on the audio engine
-    /// - Throws: Error if disabling voice processing fails
-    private func disableVoiceProcessing() throws {
-        guard let engine = self.audioEngine else { 
-            Logger.debug("[SoundPlayer] No audio engine available")
-            return 
-        }
-        
-        // Check if voice processing is enabled before attempting to disable
-        let inputEnabled = engine.inputNode.isVoiceProcessingEnabled
-        let outputEnabled = engine.outputNode.isVoiceProcessingEnabled
-        
-        var hasChanges = false
-        
-        // Only disable if currently enabled
-        if inputEnabled {
-            do {
-                try engine.inputNode.setVoiceProcessingEnabled(false)
-                hasChanges = true
-            } catch {
-                Logger.debug("[SoundPlayer] Failed to disable voice processing on input node: \(error)")
-                // Continue with output node
-            }
-        }
-        
-        if outputEnabled {
-            do {
-                try engine.outputNode.setVoiceProcessingEnabled(false)
-                hasChanges = true
-            } catch {
-                Logger.debug("[SoundPlayer] Failed to disable voice processing on output node: \(error)")
-                // This error isn't fatal
-            }
-        }
-        
-        if hasChanges {
-            Logger.debug("[SoundPlayer] Voice processing disabled")
-        } else {
-            Logger.debug("[SoundPlayer] Voice processing was already disabled")
-        }
-    }
-    
-    /// Sets up the audio engine and player node if not already configured
-    /// - Throws: Error if audio engine setup fails
+    /// Attaches a fresh player node to the shared engine.
+    /// - Throws: Error if shared engine is not available
     public func ensureAudioEngineIsSetup() throws {
-        // If engine exists, stop and detach nodes
-        if let existingEngine = self.audioEngine {
-            if existingEngine.isRunning {
-                existingEngine.stop()
-            }
-            self.detachOldAvNodesFromEngine()
+        guard let sharedEngine = self.sharedEngine else {
+            throw NSError(domain: "SoundPlayer", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "SharedAudioEngine not set"])
         }
-        
-        // Create new engine
-        self.audioEngine = AVAudioEngine()
-                    
-        audioPlayerNode = AVAudioPlayerNode()
-        if let playerNode = self.audioPlayerNode {
-            audioEngine.attach(playerNode)
-            audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: self.audioPlaybackFormat)
-            audioEngine.connect(audioEngine.mainMixerNode, to: audioEngine.outputNode, format: self.audioPlaybackFormat)
-            
-            // Only enable voice processing immediately for conversation mode
-            // For voice processing mode, we'll enable it only during actual playback
-            if config.playbackMode == .conversation {
-                try audioEngine.inputNode.setVoiceProcessingEnabled(true)
-                try audioEngine.outputNode.setVoiceProcessingEnabled(true)
-                Logger.debug("[SoundPlayer] Voice processing immediately enabled for conversation mode (stays disabled for regular mode, and enables only during playback for voice processing mode)")
-            }
-        }
+
+        // Detach any existing node first
+        self.detachOldAvNodesFromEngine()
+
+        // Create a fresh player node and attach to the shared engine
+        let node = AVAudioPlayerNode()
+        sharedEngine.attachNode(node, format: self.audioPlaybackFormat)
+        self.audioPlayerNode = node
         self.isAudioEngineIsSetup = true
-        
-        try self.audioEngine.start()
+
+        Logger.debug("[SoundPlayer] Node attached to shared engine — sampleRate=\(config.sampleRate)")
     }
     
     /// Clears all pending audio chunks from the playback queue
@@ -275,36 +213,27 @@ class SoundPlayer {
     /// - Parameter promise: Promise to resolve when stopped
     func stop(_ promise: Promise) {
         Logger.debug("[SoundPlayer] Stopping Audio")
-        
-        // Stop the audio player node first (can be done outside the queue)
+
+        // Stop the audio player node (engine stays running — it's shared)
         if self.audioPlayerNode != nil && self.audioPlayerNode.isPlaying {
-            Logger.debug("[SoundPlayer] Player is playing stopping")
+            Logger.debug("[SoundPlayer] Player is playing, stopping")
             self.audioPlayerNode.pause()
             self.audioPlayerNode.stop()
         } else {
             Logger.debug("Player is not playing")
         }
-        
-        // Stop the engine and disable voice processing if in voice processing mode
-        if config.playbackMode == .voiceProcessing {
-            if let engine = self.audioEngine, engine.isRunning {
-                engine.stop()
-                try? self.disableVoiceProcessing()
-                self.isAudioEngineIsSetup = false
-            }
-        }
-        
+
         // Clear queue and reset segment count on bufferAccessQueue for thread safety
         self.bufferAccessQueue.async { [weak self] in
             guard let self = self else {
                 promise.resolve(nil)
                 return
             }
-            
+
             // Cancel any pending final signal
             self.pendingFinalWorkItem?.cancel()
             self.pendingFinalWorkItem = nil
-            
+
             if !self.audioQueue.isEmpty {
                 Logger.debug("[SoundPlayer] Queue is not empty clearing")
                 self.audioQueue.removeAll()
@@ -332,76 +261,6 @@ class SoundPlayer {
         }
     }
     
-    /// Sets up voice processing for playback by stopping the engine, enabling voice processing, and then restarting the engine
-    /// - Returns: True if voice processing was successfully enabled, false otherwise
-    private func setupVoiceProcessingForPlayback() -> Bool {
-        do {
-            Logger.debug("[SoundPlayer] Setting up voice processing for playback")
-            
-            guard let engine = self.audioEngine else {
-                Logger.debug("[SoundPlayer] No audio engine available")
-                return false
-            }
-            
-            // If the engine is already running, we need to stop it completely first
-            if engine.isRunning {
-                Logger.debug("[SoundPlayer] Stopping engine to enable voice processing")
-                engine.stop()
-                
-                // Small delay via dispatch instead of thread sleep
-                let delayGroup = DispatchGroup()
-                delayGroup.enter()
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-                    delayGroup.leave()
-                }
-                
-                // Wait for the delay to complete - this is still synchronous but doesn't block the thread
-                _ = delayGroup.wait(timeout: .now() + 0.02)
-            }
-            
-            // Use the centralized helper method to enable voice processing
-            try enableVoiceProcessing()
-            
-            // Restart the engine
-            if !engine.isRunning {
-                Logger.debug("[SoundPlayer] Restarting engine after enabling voice processing")
-                do {
-                    try engine.start()
-                    return true
-                } catch {
-                    Logger.debug("[SoundPlayer] Failed to restart engine: \(error.localizedDescription)")
-                    
-                    // Use dispatch for the retry delay instead of thread sleep
-                    let retryGroup = DispatchGroup()
-                    retryGroup.enter()
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        retryGroup.leave()
-                    }
-                    
-                    // Wait for the delay to complete
-                    _ = retryGroup.wait(timeout: .now() + 0.1)
-                    
-                    // Second try
-                    do {
-                        try engine.start()
-                        return true
-                    } catch {
-                        Logger.debug("[SoundPlayer] Second attempt to restart engine failed: \(error.localizedDescription)")
-                    }
-                }
-            }
-            
-            return engine.isRunning
-        } catch {
-            Logger.debug("[SoundPlayer] Failed to setup voice processing: \(error.localizedDescription)")
-            // Try to restart the engine if we failed
-            try? self.audioEngine?.start()
-        }
-        return false
-    }
-    
     /// Plays an audio chunk from base64 encoded string
     /// - Parameters:
     ///   - base64String: Base64 encoded audio data
@@ -417,8 +276,6 @@ class SoundPlayer {
         rejecter: @escaping RCTPromiseRejectBlock,
         commonFormat: AVAudioCommonFormat = .pcmFormatFloat32
     ) throws {
-        Logger.debug("New play chunk")
-
         do {
             if !self.isAudioEngineIsSetup {
                 try ensureAudioEngineIsSetup()
@@ -439,17 +296,7 @@ class SoundPlayer {
                 // Cancel any pending "final" signal - new chunk arrived, so we're not done yet
                 self.pendingFinalWorkItem?.cancel()
                 self.pendingFinalWorkItem = nil
-                
-                // Enable voice processing for voice processing mode just before we start playback
-                let isFirstChunk = self.audioQueue.isEmpty && self.segmentsLeftToPlay == 0
-                if isFirstChunk && self.config.playbackMode == .voiceProcessing {
-                    // For voice processing, we need to stop the engine first, then enable voice processing
-                    let success = self.setupVoiceProcessingForPlayback()
-                    if !success {
-                        Logger.debug("[SoundPlayer] Continuing without voice processing")
-                    }
-                }
-                            
+
                 let bufferTuple = (buffer: buffer, promise: resolver, turnId: strTurnId)
                 self.audioQueue.append(bufferTuple)
                 if self.segmentsLeftToPlay == 0 && strTurnId != self.suspendSoundEventTurnId {
@@ -460,7 +307,6 @@ class SoundPlayer {
                 self.segmentsLeftToPlay += 1
                 // If not already playing, start playback
                 if self.audioQueue.count == 1 {
-                    Logger.debug("[SoundPlayer] Starting playback [ \(self.audioQueue.count)]")
                     self.playNextInQueue()
                 }
             }
@@ -482,14 +328,19 @@ class SoundPlayer {
         // If called from elsewhere, dispatch to the queue
         dispatchPrecondition(condition: .onQueue(bufferAccessQueue))
         
-        Logger.debug("[SoundPlayer] Playing audio [ \(audioQueue.count)]")
-        
+        // Bail out if the shared engine is mid-rebuild (route change).
+        // engineDidRestartAfterRouteChange will re-trigger us when ready.
+        if sharedEngine?.isRebuilding == true {
+            Logger.debug("[SoundPlayer] Engine rebuilding — deferring playNextInQueue")
+            return
+        }
+
         // Check if queue is empty
         guard !self.audioQueue.isEmpty else {
             Logger.debug("[SoundPlayer] Queue is empty, nothing to play")
             return
         }
-          
+
         // Start the audio player node if it's not already playing
         if !self.audioPlayerNode.isPlaying {
             Logger.debug("[SoundPlayer] Starting Player")
@@ -534,16 +385,6 @@ class SoundPlayer {
                                     DispatchQueue.main.async {
                                         self.delegate?.onSoundChunkPlayed(true)
                                     }
-                                    
-                                    // Handle voice processing mode cleanup
-                                    if self.config.playbackMode == .voiceProcessing {
-                                        Logger.debug("[SoundPlayer] Final segment in voice processing mode, stopping engine")
-                                        if let engine = self.audioEngine, engine.isRunning {
-                                            engine.stop()
-                                            try? self.disableVoiceProcessing()
-                                            self.isAudioEngineIsSetup = false
-                                        }
-                                    }
                                 }
                             }
                             self.pendingFinalWorkItem = workItem
@@ -552,16 +393,6 @@ class SoundPlayer {
                             // Not the final segment, send immediately
                             DispatchQueue.main.async {
                                 self.delegate?.onSoundChunkPlayed(false)
-                            }
-                        }
-                    } else {
-                        // For suspended events, still handle voice processing cleanup if needed
-                        if isFinalSegment && self.config.playbackMode == .voiceProcessing {
-                            Logger.debug("[SoundPlayer] Final segment in voice processing mode (suspended events), stopping engine")
-                            if let engine = self.audioEngine, engine.isRunning {
-                                engine.stop()
-                                try? self.disableVoiceProcessing()
-                                self.isAudioEngineIsSetup = false
                             }
                         }
                     }
