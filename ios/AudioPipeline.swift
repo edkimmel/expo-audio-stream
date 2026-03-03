@@ -125,7 +125,7 @@ class AudioPipeline {
             // ── 3. Audio session ────────────────────────────────────────
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(
-                .playAndRecord, mode: .default,
+                .playAndRecord, mode: .videoCall,
                 options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP])
             try session.setActive(true)
 

@@ -154,7 +154,7 @@ export default function App() {
         onPress={async () => {
           await ExpoPlayAudioStream.setSoundConfig({
             sampleRate: SAMPLE_PLAYBACK_RATE,
-            playbackMode: "regular",
+            playbackMode: "conversation",
           });
           await ExpoPlayAudioStream.playSound(sampleB, turnId1);
         }}
@@ -166,7 +166,7 @@ export default function App() {
         onPress={async () => {
           await ExpoPlayAudioStream.setSoundConfig({
             sampleRate: SAMPLE_PLAYBACK_RATE,
-            playbackMode: "regular",
+            playbackMode: "conversation",
           });
           await ExpoPlayAudioStream.playSound(sampleA, turnId2);
         }}
