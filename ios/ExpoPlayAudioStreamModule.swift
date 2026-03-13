@@ -64,6 +64,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             PipelineIntegration.EVENT_DRAINED,
             PipelineIntegration.EVENT_AUDIO_FOCUS_LOST,
             PipelineIntegration.EVENT_AUDIO_FOCUS_RESUMED,
+            PipelineIntegration.EVENT_FREQUENCY_BANDS,
         ])
 
         Function("destroy") {
@@ -158,6 +159,14 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             let bitDepth = options["audioFormat"] as? Int ?? 16 // 16bits
             let interval = options["interval"] as? Int ?? 1000
 
+            let fbConfigDict = options["frequencyBandConfig"] as? [String: Any]
+            let fbConfig: (lowCrossoverHz: Float, highCrossoverHz: Float)? = fbConfigDict.map {
+                (
+                    lowCrossoverHz: ($0["lowCrossoverHz"] as? NSNumber)?.floatValue ?? 300,
+                    highCrossoverHz: ($0["highCrossoverHz"] as? NSNumber)?.floatValue ?? 2000
+                )
+            }
+
             let settings = RecordingSettings(
                 sampleRate: sampleRate,
                 desiredSampleRate: sampleRate,
@@ -176,7 +185,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
                 }
             }
 
-            if let result = self.microphone.startRecording(settings: settings, intervalMilliseconds: interval) {
+            if let result = self.microphone.startRecording(settings: settings, intervalMilliseconds: interval, frequencyBandConfig: fbConfig) {
                 if let resError = result.error {
                     promise.reject("ERROR", resError)
                 } else {
@@ -384,10 +393,10 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
         }
     }
 
-    func onMicrophoneData(_ microphoneData: Data, _ soundLevel: Float?) {
+    func onMicrophoneData(_ microphoneData: Data, _ soundLevel: Float?, _ frequencyBands: FrequencyBands?) {
         let encodedData = microphoneData.base64EncodedString()
         // Construct the event payload similar to Android
-        let eventBody: [String: Any] = [
+        var eventBody: [String: Any] = [
             "fileUri": "",
             "lastEmittedSize": 0,
             "position": 0,
@@ -397,6 +406,13 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             "mimeType": "",
             "soundLevel": soundLevel ?? -160
         ]
+        if let bands = frequencyBands {
+            eventBody["frequencyBands"] = [
+                "low": bands.low,
+                "mid": bands.mid,
+                "high": bands.high
+            ]
+        }
         // Emit the event to JavaScript
         sendEvent(audioDataEvent, eventBody)
     }

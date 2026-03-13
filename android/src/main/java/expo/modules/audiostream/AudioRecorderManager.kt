@@ -36,6 +36,7 @@ class AudioRecorderManager(
 
     // Flag to control whether actual audio data or silence is sent
     private var isSilent = false
+    private var frequencyBandAnalyzer: FrequencyBandAnalyzer? = null
 
     private lateinit var recordingConfig: RecordingConfig
     private var mimeType = "audio/wav"
@@ -166,6 +167,14 @@ class AudioRecorderManager(
 
         recordingThread = Thread { recordingProcess() }.apply { start() }
 
+        // Create frequency band analyzer
+        val bandConfig = options["frequencyBandConfig"] as? Map<*, *>
+        frequencyBandAnalyzer = FrequencyBandAnalyzer(
+            sampleRate = recordingConfig.sampleRate,
+            lowCrossoverHz = (bandConfig?.get("lowCrossoverHz") as? Number)?.toFloat() ?: 300f,
+            highCrossoverHz = (bandConfig?.get("highCrossoverHz") as? Number)?.toFloat() ?: 2000f
+        )
+
         val result = bundleOf(
             "fileUri" to "",
             "channels" to recordingConfig.channels,
@@ -218,6 +227,7 @@ class AudioRecorderManager(
             pausedDuration = 0
             totalDataSize = 0
             streamUuid = null
+            frequencyBandAnalyzer = null
             lastEmittedSize = 0
 
             Log.d(Constants.TAG, "Audio resources cleaned up")
@@ -373,6 +383,16 @@ class AudioRecorderManager(
         // Calculate power level (using concise expression)
         val soundLevel = if (isSilent) -160.0f else audioDataEncoder.calculatePowerLevel(audioData, length)
 
+        // Compute frequency bands
+        val bands = if (isSilent) {
+            FrequencyBands.ZERO
+        } else {
+            frequencyBandAnalyzer?.let { analyzer ->
+                analyzer.processSamplesFromBytes(audioData, length)
+                analyzer.harvest()
+            }
+        }
+
         mainHandler.post {
             try {
                 eventSender.sendExpoEvent(
@@ -384,6 +404,11 @@ class AudioRecorderManager(
                         "position" to positionInMs,
                         "mimeType" to mimeType,
                         "soundLevel" to soundLevel,
+                        "frequencyBands" to bundleOf(
+                            "low" to (bands?.low ?: 0f),
+                            "mid" to (bands?.mid ?: 0f),
+                            "high" to (bands?.high ?: 0f)
+                        ),
                         "totalSize" to totalDataSize.toLong(),
                         "streamUuid" to streamUuid
                     )

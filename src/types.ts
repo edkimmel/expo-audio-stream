@@ -87,6 +87,21 @@ export const EncodingTypes = {
 export type Encoding =
   (typeof EncodingTypes)[keyof typeof EncodingTypes];
 
+/** RMS energy per frequency band, range [0, 1]. */
+export interface FrequencyBands {
+  low: number;
+  mid: number;
+  high: number;
+}
+
+/** Crossover frequency configuration for band analysis. */
+export interface FrequencyBandConfig {
+  /** Low/mid crossover in Hz (default 300). */
+  lowCrossoverHz?: number;
+  /** Mid/high crossover in Hz (default 2000). */
+  highCrossoverHz?: number;
+}
+
 /**
  * Smart buffering mode options
  */
@@ -135,6 +150,8 @@ export interface AudioDataEvent {
   eventDataSize: number;
   totalSize: number;
   soundLevel?: number;
+  /** Frequency band RMS energy, present when recording is active. */
+  frequencyBands?: FrequencyBands;
 }
 
 export interface RecordingConfig {
@@ -147,6 +164,8 @@ export interface RecordingConfig {
   enableProcessing?: boolean; // Boolean to enable/disable audio processing (default is false)
   pointsPerSecond?: number; // Number of data points to extract per second of audio (default is 1000)
   onAudioStream?: (event: AudioDataEvent) => Promise<void>; // Callback function to handle audio stream
+  /** Optional frequency band crossover configuration. */
+  frequencyBandConfig?: FrequencyBandConfig;
 }
 
 export interface Chunk {

@@ -24,7 +24,12 @@ const { recordingResult, subscription } =
     onAudioStream: async (event) => {
       // event.data: base64-encoded PCM chunk
       // event.soundLevel: current mic level (dB)
+      // event.frequencyBands: { low, mid, high } (0–1) if configured
       sendToBackend(event.data);
+    },
+    frequencyBandConfig: {
+      lowCrossoverHz: 300,
+      highCrossoverHz: 2000,
     },
   });
 
@@ -73,6 +78,7 @@ const result = await Pipeline.connect({
   sampleRate: 24000,
   channelCount: 1,
   targetBufferMs: 80,
+  frequencyBandIntervalMs: 100, // optional: emit frequency bands every 100ms
 });
 
 // Subscribe to events
@@ -199,6 +205,7 @@ interface RecordingConfig {
   encoding?: "pcm_32bit" | "pcm_16bit" | "pcm_8bit";
   interval?: number; // ms between audio data emissions (default 1000)
   onAudioStream?: (event: AudioDataEvent) => Promise<void>;
+  frequencyBandConfig?: FrequencyBandConfig; // enable frequency band analysis on mic audio
 }
 ```
 
@@ -216,9 +223,11 @@ interface SoundConfig {
 
 ```typescript
 interface ConnectPipelineOptions {
-  sampleRate?: number;     // default 24000
-  channelCount?: number;   // default 1 (mono)
-  targetBufferMs?: number; // ms to buffer before priming gate opens (default 80)
+  sampleRate?: number;              // default 24000
+  channelCount?: number;            // default 1 (mono)
+  targetBufferMs?: number;          // ms to buffer before priming gate opens (default 80)
+  frequencyBandIntervalMs?: number; // emit PipelineFrequencyBands every N ms (omit to disable)
+  frequencyBandConfig?: FrequencyBandConfig; // crossover frequencies (optional)
 }
 ```
 
@@ -233,13 +242,32 @@ interface PushPipelineAudioOptions {
 }
 ```
 
+### FrequencyBandConfig
+
+```typescript
+interface FrequencyBandConfig {
+  lowCrossoverHz?: number;  // boundary between low and mid bands (default 300)
+  highCrossoverHz?: number; // boundary between mid and high bands (default 2000)
+}
+```
+
+### FrequencyBands
+
+```typescript
+interface FrequencyBands {
+  low: number;  // 0–1, dB-scaled RMS energy below lowCrossoverHz
+  mid: number;  // 0–1, dB-scaled RMS energy between crossovers
+  high: number; // 0–1, dB-scaled RMS energy above highCrossoverHz
+}
+```
+
 ## Events
 
 ### Core Events
 
 | Event | Payload | Description |
 |-------|---------|-------------|
-| `AudioData` | `{ encoded, position, deltaSize, totalSize, soundLevel, ... }` | Emitted during mic capture at the configured interval. |
+| `AudioData` | `{ encoded, position, deltaSize, totalSize, soundLevel, frequencyBands?, ... }` | Emitted during mic capture at the configured interval. Includes `frequencyBands` when `frequencyBandConfig` is set. |
 | `SoundChunkPlayed` | `{ isFinal: boolean }` | A queued chunk finished playing. `isFinal` when the queue is empty. |
 | `SoundStarted` | (none) | Playback began for a new turn. |
 | `DeviceReconnected` | `{ reason }` | Audio route changed (headphones, Bluetooth, etc). |
@@ -254,6 +282,7 @@ interface PushPipelineAudioOptions {
 | `PipelineZombieDetected` | `{ playbackHead, stalledMs }` | Audio track stalled. |
 | `PipelineUnderrun` | `{ count }` | Jitter buffer underrun (silence inserted). |
 | `PipelineDrained` | `{ turnId }` | All buffered audio for the turn has been played. |
+| `PipelineFrequencyBands` | `{ low, mid, high }` | Frequency band energy (0–1) emitted at `frequencyBandIntervalMs`. |
 | `PipelineAudioFocusLost` | (empty) | Another app took audio focus. |
 | `PipelineAudioFocusResumed` | (empty) | Audio focus regained. |
 

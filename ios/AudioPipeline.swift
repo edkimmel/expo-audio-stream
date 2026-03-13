@@ -19,6 +19,7 @@ protocol PipelineListener: AnyObject {
     func onDrained(turnId: String)
     func onAudioFocusLost()
     func onAudioFocusResumed()
+    func onFrequencyBands(low: Float, mid: Float, high: Float)
 }
 
 /// Core orchestrator for the native audio pipeline (iOS).
@@ -56,6 +57,9 @@ class AudioPipeline: SharedAudioEngineDelegate {
     private let sampleRate: Int
     private let channelCount: Int
     private let targetBufferMs: Int
+    private let frequencyBandIntervalMs: Int
+    private let lowCrossoverHz: Float
+    private let highCrossoverHz: Float
     private weak var listener: PipelineListener?
     private weak var sharedEngine: SharedAudioEngine?
 
@@ -83,6 +87,9 @@ class AudioPipeline: SharedAudioEngineDelegate {
     // ── Timers ──────────────────────────────────────────────────────────
     private var stateTimer: DispatchSourceTimer?
     private var zombieTimer: DispatchSourceTimer?
+    private var frequencyBandTimer: DispatchSourceTimer?
+    private var frequencyBandAnalyzer: FrequencyBandAnalyzer?
+    private var lastEmittedBands: FrequencyBands?
     private var lastScheduleTime = Date()
 
     // ── Pipeline state ──────────────────────────────────────────────────
@@ -96,13 +103,18 @@ class AudioPipeline: SharedAudioEngineDelegate {
     // ── Pre-allocated render buffer ─────────────────────────────────────
     private var renderSamples: [Int16] = []
 
-    init(sampleRate: Int, channelCount: Int, targetBufferMs: Int, sharedEngine: SharedAudioEngine, listener: PipelineListener) {
+    init(sampleRate: Int, channelCount: Int, targetBufferMs: Int,
+         frequencyBandIntervalMs: Int = 100,
+         lowCrossoverHz: Float = 300, highCrossoverHz: Float = 2000,
+         sharedEngine: SharedAudioEngine, listener: PipelineListener) {
         self.sampleRate = sampleRate
         self.channelCount = channelCount
         self.targetBufferMs = targetBufferMs
+        self.frequencyBandIntervalMs = frequencyBandIntervalMs
+        self.lowCrossoverHz = lowCrossoverHz
+        self.highCrossoverHz = highCrossoverHz
         self.sharedEngine = sharedEngine
         self.listener = listener
-        // 20ms frame size (matches typical iOS audio buffer duration)
         self.frameSizeSamples = max(1, sampleRate * channelCount / 50)
     }
 
@@ -170,6 +182,14 @@ class AudioPipeline: SharedAudioEngineDelegate {
             // ── 7. Reset telemetry ──────────────────────────────────────
             resetTelemetry()
 
+            // ── 8. Frequency band analyzer ───────────────────────────────
+            frequencyBandAnalyzer = FrequencyBandAnalyzer(
+                sampleRate: sampleRate,
+                lowCrossoverHz: lowCrossoverHz,
+                highCrossoverHz: highCrossoverHz
+            )
+            startFrequencyBandTimer()
+
             setState(.idle)
             Logger.debug("[\(AudioPipeline.TAG)] Connected — sampleRate=\(sampleRate) " +
                 "ch=\(channelCount) frameSamples=\(frameSizeSamples) " +
@@ -192,6 +212,10 @@ class AudioPipeline: SharedAudioEngineDelegate {
         stateTimer = nil
         zombieTimer?.cancel()
         zombieTimer = nil
+        frequencyBandTimer?.cancel()
+        frequencyBandTimer = nil
+        frequencyBandAnalyzer = nil
+        lastEmittedBands = nil
 
         // Detach node from shared engine (handles pause/stop/disconnect/detach)
         if let node = playerNode {
@@ -289,6 +313,10 @@ class AudioPipeline: SharedAudioEngineDelegate {
         stateTimer = nil
         zombieTimer?.cancel()
         zombieTimer = nil
+        frequencyBandTimer?.cancel()
+        frequencyBandTimer = nil
+        frequencyBandAnalyzer = nil
+        lastEmittedBands = nil
         playerNode = nil
         outputFormat = nil
         jitterBuffer = nil
@@ -336,6 +364,7 @@ class AudioPipeline: SharedAudioEngineDelegate {
             playbackStartedForTurn = false
             lastReportedUnderrunCount = 0
             setState(.streaming)
+            frequencyBandAnalyzer?.reset()
         }
 
         // ── Decode base64 → PCM shorts ──────────────────────────────────
@@ -377,6 +406,7 @@ class AudioPipeline: SharedAudioEngineDelegate {
         playbackStartedForTurn = false
         lastReportedUnderrunCount = 0
         setState(.idle)
+        frequencyBandAnalyzer?.reset()
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -420,6 +450,17 @@ class AudioPipeline: SharedAudioEngineDelegate {
 
         // Read interleaved Int16 samples from jitter buffer
         buf.read(dest: &renderSamples, length: frameSizeSamples)
+
+        // Analyze frequency bands on the raw Int16 samples.
+        // Only feed real audio (streaming/draining) — not silence frames
+        // written while idle/priming, which would dilute RMS energy.
+        if !isInterrupted && (state == .streaming || state == .draining) {
+            renderSamples.withUnsafeBufferPointer { bufferPtr in
+                if let baseAddress = bufferPtr.baseAddress {
+                    frequencyBandAnalyzer?.processSamples(baseAddress, count: frameSizeSamples)
+                }
+            }
+        }
 
         // Convert to non-interleaved Float32 for AVAudioEngine
         let framesPerBuffer = frameSizeSamples / channelCount
@@ -534,6 +575,32 @@ class AudioPipeline: SharedAudioEngineDelegate {
         }
         timer.resume()
         zombieTimer = timer
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Frequency band emission
+    // ════════════════════════════════════════════════════════════════════
+
+    private func startFrequencyBandTimer() {
+        let intervalSec = TimeInterval(frequencyBandIntervalMs) / 1000.0
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + intervalSec, repeating: intervalSec)
+        timer.setEventHandler { [weak self] in
+            guard let self = self, self.running,
+                  let analyzer = self.frequencyBandAnalyzer else { return }
+            let bands: FrequencyBands
+            if analyzer.hasData() {
+                bands = analyzer.harvest()
+                self.lastEmittedBands = bands
+            } else if let last = self.lastEmittedBands {
+                bands = last
+            } else {
+                return
+            }
+            self.listener?.onFrequencyBands(low: bands.low, mid: bands.mid, high: bands.high)
+        }
+        timer.resume()
+        frequencyBandTimer = timer
     }
 
     // ════════════════════════════════════════════════════════════════════

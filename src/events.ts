@@ -20,6 +20,7 @@ export interface AudioEventPayload {
   mimeType: string;
   streamUuid: string;
   soundLevel?: number;
+  frequencyBands?: { low: number; mid: number; high: number };
 }
 
 export type SoundChunkPlayedEventPayload = {

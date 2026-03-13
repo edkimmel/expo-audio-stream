@@ -26,6 +26,8 @@ class Microphone {
     private var inittedAudioSession = false
     private var isRecording: Bool = false
     private var isSilent: Bool = false
+    private var frequencyBandAnalyzer: FrequencyBandAnalyzer?
+    private var frequencyBandConfig: (lowCrossoverHz: Float, highCrossoverHz: Float)?
     
     init() {
         NotificationCenter.default.addObserver(
@@ -54,7 +56,7 @@ class Microphone {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     guard let self = self, let settings = self.recordingSettings else { return }
                     
-                    _ = startRecording(settings: self.recordingSettings!, intervalMilliseconds: 100)
+                    _ = startRecording(settings: self.recordingSettings!, intervalMilliseconds: 100, frequencyBandConfig: self.frequencyBandConfig)
                 }
             }
         case .categoryChange:
@@ -69,7 +71,8 @@ class Microphone {
         self.isSilent = isSilent
     }
     
-    func startRecording(settings: RecordingSettings, intervalMilliseconds: Int) -> StartRecordingResult? {
+    func startRecording(settings: RecordingSettings, intervalMilliseconds: Int,
+                        frequencyBandConfig: (lowCrossoverHz: Float, highCrossoverHz: Float)? = nil) -> StartRecordingResult? {
         guard !isRecording else {
             Logger.debug("Debug: Recording is already in progress.")
             return StartRecordingResult(error: "Recording is already in progress.")
@@ -96,6 +99,16 @@ class Microphone {
         Logger.debug("Debug: Hardware sample rate is \(hardwareFormat.sampleRate) Hz, desired sample rate is \(settings.sampleRate) Hz")
 
         recordingSettings = newSettings  // Update the class property with the new settings
+
+        self.frequencyBandConfig = frequencyBandConfig
+        // Analyzer uses the desired (target) sample rate, not hardware rate
+        let targetRate = Int(settings.desiredSampleRate ?? settings.sampleRate)
+        let fbConfig = frequencyBandConfig ?? (lowCrossoverHz: Float(300), highCrossoverHz: Float(2000))
+        frequencyBandAnalyzer = FrequencyBandAnalyzer(
+            sampleRate: targetRate,
+            lowCrossoverHz: fbConfig.lowCrossoverHz,
+            highCrossoverHz: fbConfig.highCrossoverHz
+        )
 
         // Compute tap buffer size from interval so Core Audio delivers at the right cadence
         let intervalSamples = AVAudioFrameCount(
@@ -151,8 +164,9 @@ class Microphone {
         if audioEngine != nil {
             audioEngine.inputNode.removeTap(onBus: 0)
             audioEngine.stop()
+            frequencyBandAnalyzer = nil
         }
-        
+
         if let promiseResolver = promise {
             promiseResolver.resolve(nil)
         }
@@ -212,10 +226,21 @@ class Microphone {
             data = Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
         }
 
+        // Compute frequency bands from the Int16 PCM data
+        let bands: FrequencyBands?
+        if isSilent {
+            bands = .zero
+        } else if let analyzer = frequencyBandAnalyzer {
+            analyzer.processSamplesFromData(data)
+            bands = analyzer.harvest()
+        } else {
+            bands = nil
+        }
+
         totalDataSize += Int64(data.count)
 
         // Emit immediately — tap buffer size is already interval-aligned
-        self.delegate?.onMicrophoneData(data, powerLevel)
+        self.delegate?.onMicrophoneData(data, powerLevel, bands)
         self.lastEmittedSize = totalDataSize
     }
 }

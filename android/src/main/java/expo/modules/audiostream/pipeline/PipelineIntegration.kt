@@ -92,6 +92,7 @@ class PipelineIntegration(
         const val EVENT_DRAINED            = "PipelineDrained"
         const val EVENT_AUDIO_FOCUS_LOST   = "PipelineAudioFocusLost"
         const val EVENT_AUDIO_FOCUS_RESUMED = "PipelineAudioFocusResumed"
+        const val EVENT_FREQUENCY_BANDS = "PipelineFrequencyBands"
     }
 
     private var pipeline: AudioPipeline? = null
@@ -116,12 +117,19 @@ class PipelineIntegration(
             val sampleRate = (options["sampleRate"] as? Number)?.toInt() ?: 24000
             val channelCount = (options["channelCount"] as? Number)?.toInt() ?: 1
             val targetBufferMs = (options["targetBufferMs"] as? Number)?.toInt() ?: 80
+            val frequencyBandIntervalMs = (options["frequencyBandIntervalMs"] as? Number)?.toInt() ?: 100
+            val bandConfig = options["frequencyBandConfig"] as? Map<*, *>
+            val lowCrossoverHz = (bandConfig?.get("lowCrossoverHz") as? Number)?.toFloat() ?: 300f
+            val highCrossoverHz = (bandConfig?.get("highCrossoverHz") as? Number)?.toFloat() ?: 2000f
 
             pipeline = AudioPipeline(
                 context = context,
                 sampleRate = sampleRate,
                 channelCount = channelCount,
                 targetBufferMs = targetBufferMs,
+                frequencyBandIntervalMs = frequencyBandIntervalMs,
+                lowCrossoverHz = lowCrossoverHz,
+                highCrossoverHz = highCrossoverHz,
                 listener = this
             )
             pipeline!!.connect()
@@ -301,6 +309,14 @@ class PipelineIntegration(
 
     override fun onAudioFocusResumed() {
         sendEvent(EVENT_AUDIO_FOCUS_RESUMED, Bundle())
+    }
+
+    override fun onFrequencyBands(low: Float, mid: Float, high: Float) {
+        sendEvent(EVENT_FREQUENCY_BANDS, Bundle().apply {
+            putFloat("low", low)
+            putFloat("mid", mid)
+            putFloat("high", high)
+        })
     }
 
     // ── Helper ──────────────────────────────────────────────────────────

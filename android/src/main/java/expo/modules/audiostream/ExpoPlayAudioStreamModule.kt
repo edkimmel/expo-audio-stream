@@ -106,7 +106,8 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             PipelineIntegration.EVENT_UNDERRUN,
             PipelineIntegration.EVENT_DRAINED,
             PipelineIntegration.EVENT_AUDIO_FOCUS_LOST,
-            PipelineIntegration.EVENT_AUDIO_FOCUS_RESUMED
+            PipelineIntegration.EVENT_AUDIO_FOCUS_RESUMED,
+            PipelineIntegration.EVENT_FREQUENCY_BANDS
         )
 
         // Initialize managers for playback and for recording

@@ -12,6 +12,7 @@ import {
   PlaybackMode,
   Encoding,
   EncodingTypes,
+  FrequencyBands,
   PlaybackModes,
   // Audio jitter buffer types
   IAudioBufferConfig,
@@ -132,6 +133,7 @@ export class ExpoPlayAudioStream {
               position,
               encoded,
               soundLevel,
+              frequencyBands,
             } = event;
             if (!encoded) {
               console.error(
@@ -146,6 +148,7 @@ export class ExpoPlayAudioStream {
               eventDataSize: deltaSize,
               totalSize,
               soundLevel,
+              frequencyBands,
             });
           }
         );
@@ -192,7 +195,7 @@ export class ExpoPlayAudioStream {
     onMicrophoneStream: (event: AudioDataEvent) => Promise<void>
   ): Subscription {
     return addAudioEventListener(async (event: AudioEventPayload) => {
-      const { fileUri, deltaSize, totalSize, position, encoded, soundLevel } =
+      const { fileUri, deltaSize, totalSize, position, encoded, soundLevel, frequencyBands } =
         event;
       if (!encoded) {
         console.error(`[ExpoPlayAudioStream] Encoded audio data is missing`);
@@ -205,6 +208,7 @@ export class ExpoPlayAudioStream {
         eventDataSize: deltaSize,
         totalSize,
         soundLevel,
+        frequencyBands,
       });
     });
   }
@@ -316,6 +320,7 @@ export {
   PlaybackMode,
   Encoding,
   EncodingTypes,
+  FrequencyBands,
   PlaybackModes,
   // Audio jitter buffer types
   IAudioBufferConfig,

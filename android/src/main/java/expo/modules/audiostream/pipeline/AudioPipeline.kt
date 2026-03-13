@@ -13,6 +13,8 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Base64
 import android.util.Log
+import expo.modules.audiostream.FrequencyBandAnalyzer
+import expo.modules.audiostream.FrequencyBands
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
@@ -49,6 +51,7 @@ interface PipelineListener {
     fun onDrained(turnId: String)
     fun onAudioFocusLost()
     fun onAudioFocusResumed()
+    fun onFrequencyBands(low: Float, mid: Float, high: Float)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -84,6 +87,9 @@ class AudioPipeline(
     private val sampleRate: Int,
     private val channelCount: Int,
     private val targetBufferMs: Int,
+    private val frequencyBandIntervalMs: Int = 100,
+    private val lowCrossoverHz: Float = 300f,
+    private val highCrossoverHz: Float = 2000f,
     private val listener: PipelineListener
 ) {
     companion object {
@@ -184,6 +190,11 @@ class AudioPipeline(
     // ── Underrun debounce ───────────────────────────────────────────────
     private var lastReportedUnderrunCount = 0
 
+    // ── Frequency band analysis ──────────────────────────────────────
+    private var frequencyBandAnalyzer: FrequencyBandAnalyzer? = null
+    private var frequencyBandExecutor: java.util.concurrent.ScheduledExecutorService? = null
+    @Volatile private var lastEmittedBands: FrequencyBands? = null
+
     // ── State ───────────────────────────────────────────────────────────
     @Volatile private var state: PipelineState = PipelineState.IDLE
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -260,6 +271,14 @@ class AudioPipeline(
             // ── 7. Reset telemetry ──────────────────────────────────────
             resetTelemetry()
 
+            // ── 8. Frequency band analyzer ──────────────────────────
+            frequencyBandAnalyzer = FrequencyBandAnalyzer(
+                sampleRate = sampleRate,
+                lowCrossoverHz = lowCrossoverHz,
+                highCrossoverHz = highCrossoverHz
+            )
+            startFrequencyBandTimer()
+
             setState(PipelineState.IDLE)
             Log.d(TAG, "Connected — sampleRate=$sampleRate ch=$channelCount " +
                     "frameSamples=$frameSizeSamples targetBuffer=${targetBufferMs}ms")
@@ -283,6 +302,12 @@ class AudioPipeline(
         // Stop zombie detection
         zombieThread?.interrupt()
         zombieThread = null
+
+        // Stop frequency band timer
+        frequencyBandExecutor?.shutdownNow()
+        frequencyBandExecutor = null
+        frequencyBandAnalyzer = null
+        lastEmittedBands = null
 
         // Remove VolumeGuard
         removeVolumeGuard()
@@ -357,6 +382,7 @@ class AudioPipeline(
                 // so real audio plays immediately without waiting behind queued silence.
                 pendingFlush.set(true)
                 setState(PipelineState.STREAMING)
+                frequencyBandAnalyzer?.reset()
             }
 
             // ── Decode base64 → PCM shorts ──────────────────────────────
@@ -400,6 +426,7 @@ class AudioPipeline(
             playbackStartedForTurn = false
             lastReportedUnderrunCount = 0
             setState(PipelineState.IDLE)
+            frequencyBandAnalyzer?.reset()
         }
     }
 
@@ -456,6 +483,13 @@ class AudioPipeline(
             // If audio focus is lost, overwrite with silence
             if (audioFocusLost.get()) {
                 frame.fill(0)
+            }
+
+            // Analyze frequency bands on the raw Int16 samples.
+            // Only feed real audio (streaming/draining) — not silence frames
+            // written while idle/priming, which would dilute RMS energy.
+            if (!audioFocusLost.get() && (state == PipelineState.STREAMING || state == PipelineState.DRAINING)) {
+                frequencyBandAnalyzer?.processSamples(frame, frame.size)
             }
 
             // Write to AudioTrack (BLOCKING — will park thread until space available)
@@ -575,6 +609,27 @@ class AudioPipeline(
             isDaemon = true
             start()
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Frequency band emission
+    // ════════════════════════════════════════════════════════════════════
+
+    private fun startFrequencyBandTimer() {
+        val executor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "AudioPipeline-FreqBands").apply { isDaemon = true }
+        }
+        executor.scheduleAtFixedRate({
+            if (!running.get()) return@scheduleAtFixedRate
+            val analyzer = frequencyBandAnalyzer ?: return@scheduleAtFixedRate
+            val bands = if (analyzer.hasData()) {
+                analyzer.harvest().also { lastEmittedBands = it }
+            } else {
+                lastEmittedBands ?: return@scheduleAtFixedRate
+            }
+            listener.onFrequencyBands(bands.low, bands.mid, bands.high)
+        }, frequencyBandIntervalMs.toLong(), frequencyBandIntervalMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
+        frequencyBandExecutor = executor
     }
 
     // ════════════════════════════════════════════════════════════════════

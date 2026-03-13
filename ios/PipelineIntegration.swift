@@ -22,6 +22,7 @@ class PipelineIntegration: PipelineListener {
     static let EVENT_DRAINED             = "PipelineDrained"
     static let EVENT_AUDIO_FOCUS_LOST    = "PipelineAudioFocusLost"
     static let EVENT_AUDIO_FOCUS_RESUMED = "PipelineAudioFocusResumed"
+    static let EVENT_FREQUENCY_BANDS    = "PipelineFrequencyBands"
 
     private weak var eventSender: PipelineEventSender?
     private weak var sharedEngine: SharedAudioEngine?
@@ -56,11 +57,18 @@ class PipelineIntegration: PipelineListener {
         let sampleRate = (options["sampleRate"] as? NSNumber)?.intValue ?? 24000
         let channelCount = (options["channelCount"] as? NSNumber)?.intValue ?? 1
         let targetBufferMs = (options["targetBufferMs"] as? NSNumber)?.intValue ?? 80
+        let frequencyBandIntervalMs = (options["frequencyBandIntervalMs"] as? NSNumber)?.intValue ?? 100
+        let bandConfig = options["frequencyBandConfig"] as? [String: Any]
+        let lowCrossoverHz = (bandConfig?["lowCrossoverHz"] as? NSNumber)?.floatValue ?? 300
+        let highCrossoverHz = (bandConfig?["highCrossoverHz"] as? NSNumber)?.floatValue ?? 2000
 
         let p = AudioPipeline(
             sampleRate: sampleRate,
             channelCount: channelCount,
             targetBufferMs: targetBufferMs,
+            frequencyBandIntervalMs: frequencyBandIntervalMs,
+            lowCrossoverHz: lowCrossoverHz,
+            highCrossoverHz: highCrossoverHz,
             sharedEngine: sharedEngine,
             listener: self
         )
@@ -204,6 +212,12 @@ class PipelineIntegration: PipelineListener {
 
     func onAudioFocusResumed() {
         sendEvent(PipelineIntegration.EVENT_AUDIO_FOCUS_RESUMED, [:])
+    }
+
+    func onFrequencyBands(low: Float, mid: Float, high: Float) {
+        sendEvent(PipelineIntegration.EVENT_FREQUENCY_BANDS, [
+            "low": low, "mid": mid, "high": high
+        ])
     }
 
     // ── Helper ────────────────────────────────────────────────────────

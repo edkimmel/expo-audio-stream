@@ -2,7 +2,7 @@
 // Native Audio Pipeline — V3 TypeScript Types
 // ────────────────────────────────────────────────────────────────────────────
 
-import { PlaybackMode } from "../types";
+import { PlaybackMode, FrequencyBandConfig, FrequencyBands } from "../types";
 
 // ── Connect ─────────────────────────────────────────────────────────────────
 
@@ -21,6 +21,10 @@ export interface ConnectPipelineOptions {
    * Playback mode hint for native optimizations. Affects thread priority and
    */
   playbackMode?: PlaybackMode;
+  /** Interval in ms for PipelineFrequencyBands events (default 100). */
+  frequencyBandIntervalMs?: number;
+  /** Optional frequency band crossover configuration. */
+  frequencyBandConfig?: FrequencyBandConfig;
 }
 
 /** Result returned from a successful `connectPipeline()` call. */
@@ -116,6 +120,9 @@ export type PipelineAudioFocusLostEvent = Record<string, never>;
 /** Payload for `PipelineAudioFocusResumed` (empty — presence is the signal). */
 export type PipelineAudioFocusResumedEvent = Record<string, never>;
 
+/** Payload for `PipelineFrequencyBands`. */
+export interface PipelineFrequencyBandsEvent extends FrequencyBands {}
+
 /**
  * Map of all pipeline event names to their payload types.
  * Used with `Pipeline.subscribe<K>()` for type-safe event subscriptions.
@@ -129,6 +136,7 @@ export interface PipelineEventMap {
   PipelineDrained: PipelineDrainedEvent;
   PipelineAudioFocusLost: PipelineAudioFocusLostEvent;
   PipelineAudioFocusResumed: PipelineAudioFocusResumedEvent;
+  PipelineFrequencyBands: PipelineFrequencyBandsEvent;
 }
 
 /** Union of all pipeline event name strings. */

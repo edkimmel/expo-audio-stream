@@ -3,11 +3,12 @@ import {
   ExpoPlayAudioStream,
   Pipeline,
 } from "@edkimmel/expo-audio-stream";
-import { use, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { sampleA } from "./samples/sample-a";
 import { sampleB } from "./samples/sample-b";
 import type {
   AudioDataEvent,
+  FrequencyBands,
 } from "@edkimmel/expo-audio-stream";
 import type { EventSubscription } from "expo-modules-core";
 
@@ -15,7 +16,7 @@ const ANDROID_SAMPLE_RATE = 24000;
 const IOS_SAMPLE_RATE = 24000;
 const CHANNELS = 1;
 const ENCODING = "pcm_16bit";
-const RECORDING_INTERVAL = 30;
+const RECORDING_INTERVAL = 100;
 
 // Sample audio files are encoded at 16kHz
 const SAMPLE_PLAYBACK_RATE = 16000;
@@ -42,6 +43,8 @@ export default function App() {
     message: string;
   } | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [micBands, setMicBands] = useState<FrequencyBands | null>(null);
+  const [pipelineBands, setPipelineBands] = useState<FrequencyBands | null>(null);
 
   const eventListenerSubscriptionRef = useRef<EventSubscription | undefined>(
     undefined
@@ -67,6 +70,9 @@ export default function App() {
   const onAudioCallback = async (audio: AudioDataEvent) => {
     const nowMilliseconds = Date.now() % 1000;
     console.log(`Mic data ${nowMilliseconds}:`, audio.data.slice(0, 100));
+    if (audio.frequencyBands) {
+      setMicBands(audio.frequencyBands);
+    }
   };
 
   // Subscribe to sound chunk played events
@@ -95,6 +101,7 @@ export default function App() {
         channelCount: 1,
         targetBufferMs: 80,
         playbackMode: "conversation",
+        frequencyBandIntervalMs: 100,
       });
       console.log("Pipeline connected:", result);
 
@@ -145,6 +152,13 @@ export default function App() {
         console.log("Pipeline audio focus:", e.focused ? "resumed" : "lost");
       });
 
+      const freqBandsSub = Pipeline.subscribe(
+        "PipelineFrequencyBands",
+        (e) => {
+          setPipelineBands({ low: e.low, mid: e.mid, high: e.high });
+        }
+      );
+
       pipelineSubsRef.current = [
         stateSub,
         playbackStartedSub,
@@ -152,6 +166,7 @@ export default function App() {
         underrunSub,
         errorSub,
         focusSub,
+        freqBandsSub,
       ];
     } catch (err) {
       console.error("Pipeline connect failed:", err);
@@ -164,6 +179,7 @@ export default function App() {
       pipelineSubsRef.current.forEach((s) => s.remove());
       pipelineSubsRef.current = [];
       setPipelineState("idle");
+      setPipelineBands(null);
     } catch (err) {
       console.error("Pipeline disconnect failed:", err);
     }
@@ -263,6 +279,10 @@ export default function App() {
               channels: CHANNELS,
               encoding: ENCODING,
               onAudioStream: onAudioCallback,
+              frequencyBandConfig: {
+                lowCrossoverHz: 300,
+                highCrossoverHz: 2000,
+              },
             });
           console.log("Recording started:", JSON.stringify(recordingResult));
           eventListenerSubscriptionRef.current = subscription;
@@ -278,6 +298,7 @@ export default function App() {
           eventListenerSubscriptionRef.current?.remove();
           eventListenerSubscriptionRef.current = undefined;
           setIsRecording(false);
+          setMicBands(null);
         }}
         title="Stop Microphone"
       />
@@ -285,6 +306,7 @@ export default function App() {
       <Text style={styles.status}>
         Mic: {isRecording ? "recording" : "idle"}
       </Text>
+      {micBands && <BandMeter label="Mic Bands" bands={micBands} />}
 
       {/* ── Pipeline ───────────────────────────────────── */}
       <Text style={styles.section}>Pipeline</Text>
@@ -319,6 +341,7 @@ export default function App() {
       <Button onPress={disconnectPipeline} title="Disconnect Pipeline" />
 
       <Text style={styles.status}>Pipeline: {pipelineState}</Text>
+      {pipelineBands && <BandMeter label="Pipeline Bands" bands={pipelineBands} />}
 
       {pipelineError && (
         <View style={styles.errorBanner}>
@@ -340,6 +363,34 @@ export default function App() {
 
 function Spacer() {
   return <View style={{ height: 8 }} />;
+}
+
+function BandMeter({ label, bands }: { label: string; bands: FrequencyBands }) {
+  const fmt = (v: number) => v.toFixed(4);
+  const barWidth = (v: number) => `${Math.min(v * 100, 100)}%` as const;
+  return (
+    <View style={styles.bandContainer}>
+      <Text style={styles.bandLabel}>{label}</Text>
+      {(["low", "mid", "high"] as const).map((band) => (
+        <View key={band} style={styles.bandRow}>
+          <Text style={styles.bandName}>{band}</Text>
+          <View style={styles.bandBarBg}>
+            <View
+              style={[
+                styles.bandBarFill,
+                {
+                  width: barWidth(bands[band]),
+                  backgroundColor:
+                    band === "low" ? "#4caf50" : band === "mid" ? "#ff9800" : "#f44336",
+                },
+              ]}
+            />
+          </View>
+          <Text style={styles.bandValue}>{fmt(bands[band])}</Text>
+        </View>
+      ))}
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -387,6 +438,47 @@ const styles = StyleSheet.create({
     color: "#ffcdd2",
     fontSize: 12,
     textAlign: "center",
+  },
+  bandContainer: {
+    marginTop: 8,
+    alignSelf: "stretch",
+    padding: 10,
+    backgroundColor: "#f5f5f5",
+    borderRadius: 8,
+  },
+  bandLabel: {
+    fontSize: 13,
+    fontWeight: "600",
+    marginBottom: 6,
+    color: "#333",
+  },
+  bandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  bandName: {
+    width: 32,
+    fontSize: 12,
+    color: "#666",
+  },
+  bandBarBg: {
+    flex: 1,
+    height: 10,
+    backgroundColor: "#ddd",
+    borderRadius: 5,
+    marginHorizontal: 6,
+    overflow: "hidden",
+  },
+  bandBarFill: {
+    height: "100%",
+    borderRadius: 5,
+  },
+  bandValue: {
+    width: 50,
+    fontSize: 11,
+    color: "#999",
+    textAlign: "right",
   },
 });
 

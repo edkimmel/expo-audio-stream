@@ -23,6 +23,7 @@ the recording error channel.
 | `fileUri` | `string` | Always `""` (file I/O removed) |
 | `lastEmittedSize` | `number` | Previous `totalSize` value |
 | `mimeType` | `string` | e.g. `"audio/wav"` |
+| `frequencyBands` | `{ low, mid, high }?` | dB-scaled RMS energy per band (0–1). Present only when `frequencyBandConfig` is passed to `startMicrophone`. |
 
 **Error variant** (same event name, different shape):
 
@@ -96,11 +97,10 @@ Fired after each audio chunk finishes playback.
 
 ---
 
-## Pipeline Events (Android only)
+## Pipeline Events
 
-These events are emitted by `AudioPipeline` via `PipelineIntegration`. They are
-not available on iOS, which still uses the legacy `SoundStarted`/`SoundChunkPlayed`
-path.
+These events are emitted by `AudioPipeline` via `PipelineIntegration` on both
+Android and iOS.
 
 ### `PipelineStateChanged`
 
@@ -197,6 +197,28 @@ The pipeline transitions from `draining` to `idle`.
 - This is your "turn complete" signal. Resume mic recording, send next request,
   update UI to "listening".
 - Equivalent to `SoundChunkPlayed` with `isFinal=true` but for the pipeline path.
+
+---
+
+### `PipelineFrequencyBands`
+
+Fired at the interval configured by `frequencyBandIntervalMs` during pipeline
+playback. Uses IIR-based frequency splitting and dB-scaled RMS energy.
+
+| Field | Type | Notes |
+|---|---|---|
+| `low` | `number` | 0–1, energy below `lowCrossoverHz` (default 300 Hz) |
+| `mid` | `number` | 0–1, energy between crossover frequencies |
+| `high` | `number` | 0–1, energy above `highCrossoverHz` (default 2000 Hz) |
+
+**Platform:** Android, iOS
+
+**JS response:**
+- Drive a visual audio meter or waveform visualization.
+- Values are dB-scaled from raw RMS so they map well to UI bar heights.
+- When no new audio has been pushed, the last known band values are re-emitted
+  to maintain a steady cadence. Values drop to zero only when the pipeline is
+  idle (disconnected or between turns).
 
 ---
 
