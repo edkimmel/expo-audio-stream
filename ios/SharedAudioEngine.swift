@@ -170,8 +170,14 @@ class SharedAudioEngine {
 
         node.pause()
         node.stop()
-        engine.disconnectNodeOutput(node)
-        engine.detach(node)
+
+        // Only disconnect/detach if the node is still attached to this engine.
+        // The node may already have been removed (e.g. engine died, concurrent
+        // teardown, or duplicate disconnect call).
+        if node.engine === engine {
+            engine.disconnectNodeOutput(node)
+            engine.detach(node)
+        }
         attachedNodes.removeAll { $0.node === node }
 
         Logger.debug("[\(SharedAudioEngine.TAG)] Node detached")
@@ -194,8 +200,12 @@ class SharedAudioEngine {
             for info in attachedNodes {
                 info.node.pause()
                 info.node.stop()
-                engine.disconnectNodeOutput(info.node)
-                engine.detach(info.node)
+                // Guard against nodes already removed from engine (e.g. engine
+                // died or node was detached by a concurrent disconnect call).
+                if info.node.engine === engine {
+                    engine.disconnectNodeOutput(info.node)
+                    engine.detach(info.node)
+                }
             }
         }
         attachedNodes.removeAll()
@@ -265,8 +275,10 @@ class SharedAudioEngine {
 
             // 3. Detach all nodes
             for info in attachedNodes {
-                engine.disconnectNodeOutput(info.node)
-                engine.detach(info.node)
+                if info.node.engine === engine {
+                    engine.disconnectNodeOutput(info.node)
+                    engine.detach(info.node)
+                }
             }
             Logger.debug("[\(SharedAudioEngine.TAG)] Nodes detached (\(attachedNodes.count))")
 
