@@ -7,12 +7,27 @@ import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 
 /**
- * Manages audio effects for voice recording, including:
- * - Acoustic Echo Cancellation (AEC)
- * - Noise Suppression (NS)
- * - Automatic Gain Control (AGC)
+ * Manages hardware audio effects for voice recording.
+ *
+ * We use VOICE_RECOGNITION as our audio source. The Android CDD (Section 5.4)
+ * mandates that this source delivers unprocessed audio:
+ *   [C-1-2] MUST disable noise reduction by default
+ *   [C-1-3] MUST disable automatic gain control by default
+ *
+ * NS and AGC are therefore off by default to honor the spec. Enabling them
+ * re-introduces the processing the CDD explicitly prohibits for this source
+ * and can cause low-volume capture on many OEMs.
+ *
+ * AEC is the one effect the CDD permits for VOICE_RECOGNITION ("expects a
+ * stream that has an echo cancellation effect if available"), so it is
+ * enabled by default.
  */
-class AudioEffectsManager {
+class AudioEffectsManager(
+    /** Enable hardware noise suppressor. Default false — CDD 5.4 [C-1-2] prohibits it for VOICE_RECOGNITION. */
+    private val enableNS: Boolean = false,
+    /** Enable hardware AGC. Default false — CDD 5.4 [C-1-3] prohibits it for VOICE_RECOGNITION. */
+    private val enableAGC: Boolean = false
+) {
     // Audio effects
     private var acousticEchoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
@@ -41,11 +56,21 @@ class AudioEffectsManager {
                 Log.d(Constants.TAG, "Acoustic Echo Canceler enabled: ${acousticEchoCanceler?.enabled}")
             }
             
-            // Apply noise suppression
-            enableNoiseSuppression(audioSessionId)
-            
-            // Apply automatic gain control
-            enableAutomaticGainControl(audioSessionId)
+            // NS off by default — CDD 5.4 [C-1-2] prohibits it for VOICE_RECOGNITION.
+            // Enabling it can aggressively attenuate speech on many OEMs.
+            if (enableNS) {
+                enableNoiseSuppression(audioSessionId)
+            } else {
+                Log.d(Constants.TAG, "Noise Suppressor skipped (CDD 5.4 [C-1-2])")
+            }
+
+            // AGC off by default — CDD 5.4 [C-1-3] prohibits it for VOICE_RECOGNITION.
+            // Hardware AGC is also unreliable across devices.
+            if (enableAGC) {
+                enableAutomaticGainControl(audioSessionId)
+            } else {
+                Log.d(Constants.TAG, "Hardware AGC skipped (CDD 5.4 [C-1-3])")
+            }
             
         } catch (e: Exception) {
             Log.e(Constants.TAG, "Error setting up audio effects", e)

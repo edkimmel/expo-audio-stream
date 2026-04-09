@@ -37,6 +37,7 @@ class AudioRecorderManager(
     // Flag to control whether actual audio data or silence is sent
     private var isSilent = false
     private var frequencyBandAnalyzer: FrequencyBandAnalyzer? = null
+    private val gainNormalizer = GainNormalizer()
 
     private lateinit var recordingConfig: RecordingConfig
     private var mimeType = "audio/wav"
@@ -330,6 +331,7 @@ class AudioRecorderManager(
 
                 if (bytesRead > 0) {
                     consecutiveErrors = 0
+                    gainNormalizer.apply(audioData, bytesRead)
                     totalDataSize += bytesRead
                     // Emit immediately — each read is one interval of audio
                     emitAudioData(audioData, bytesRead)
