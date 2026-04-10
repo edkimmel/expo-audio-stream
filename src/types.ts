@@ -17,41 +17,6 @@ export type PlaybackMode =
   (typeof PlaybackModes)[keyof typeof PlaybackModes];
 
 /**
- * Configuration for audio playback settings
- */
-export interface SoundConfig {
-  /**
-   * The sample rate for audio playback in Hz
-   */
-  sampleRate?: SampleRate;
-
-  /**
-   * The playback mode (regular, voiceProcessing, or conversation)
-   */
-  playbackMode?: PlaybackMode;
-
-  /**
-   * When true, resets to default configuration regardless of other parameters
-   */
-  useDefault?: boolean;
-
-  /**
-   * Enable jitter buffering for audio streams
-   */
-  enableBuffering?: boolean;
-
-  /**
-   * Automatically enable buffering based on network conditions
-   */
-  autoBuffer?: boolean;
-
-  /**
-   * Configuration for the jitter buffer when enableBuffering is true
-   */
-  bufferConfig?: Partial<IAudioBufferConfig>;
-}
-
-/**
  * Configuration for buffered audio streaming
  */
 export interface BufferedStreamConfig {

@@ -3,8 +3,6 @@ package expo.modules.audiostream
 object Constants {
     const val AUDIO_EVENT_NAME = "AudioData"
     const val AUDIO_ANALYSIS_EVENT_NAME = "AudioAnalysis"
-    const val SOUND_CHUNK_PLAYED_EVENT_NAME = "SoundChunkPlayed"
-    const val SOUND_STARTED_EVENT_NAME = "SoundStarted"
     const val DEVICE_RECONNECTED_EVENT_NAME = "DeviceReconnected"
     const val DEFAULT_SAMPLE_RATE = 16000 // Default sample rate for audio recording
     const val DEFAULT_CHANNEL_CONFIG = 1 // Mono

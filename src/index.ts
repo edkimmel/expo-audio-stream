@@ -8,7 +8,6 @@ import {
   AudioRecording,
   RecordingConfig,
   StartRecordingResult,
-  SoundConfig,
   PlaybackMode,
   Encoding,
   EncodingTypes,
@@ -31,16 +30,12 @@ import {
 
 import {
   addAudioEventListener,
-  addSoundChunkPlayedListener,
   AudioEventPayload,
-  SoundChunkPlayedEventPayload,
   AudioEvents,
   subscribeToEvent,
   DeviceReconnectedReason,
   DeviceReconnectedEventPayload,
 } from "./events";
-
-const SuspendSoundEventTurnId = "suspend-sound-events";
 
 export class ExpoPlayAudioStream {
   /**
@@ -50,63 +45,6 @@ export class ExpoPlayAudioStream {
    */
   static async destroy() {
     await ExpoPlayAudioStreamModule.destroy();
-  }
-
-  /**
-   * @deprecated Use the `Pipeline` class for more efficient audio streaming with better error handling and telemetry.
-   * Plays a sound.
-   * @param {string} audio - The audio to play.
-   * @param {string} turnId - The turn ID.
-   * @param {string} [encoding] - The encoding format of the audio data ('pcm_f32le' or 'pcm_s16le').
-   * @returns {Promise<void>}
-   * @throws {Error} If the sound fails to play.
-   */
-  static async playSound(
-    audio: string,
-    turnId: string,
-    encoding?: Encoding
-  ): Promise<void> {
-    try {
-      await ExpoPlayAudioStreamModule.playSound(
-        audio,
-        turnId,
-        encoding ?? EncodingTypes.PCM_S16LE
-      );
-    } catch (error) {
-      console.error(error);
-      throw new Error(`Failed to enqueue audio: ${error}`);
-    }
-  }
-
-  /**
-   * @deprecated Use the `Pipeline` class for more efficient audio streaming with better error handling and telemetry.
-   * Stops the currently playing sound.
-   * @returns {Promise<void>}
-   * @throws {Error} If the sound fails to stop.
-   */
-  static async stopSound(): Promise<void> {
-    try {
-      await ExpoPlayAudioStreamModule.stopSound();
-    } catch (error) {
-      console.error(error);
-      throw new Error(`Failed to stop enqueued audio: ${error}`);
-    }
-  }
-
-  /**
-   * @deprecated Use the `Pipeline` class for more efficient audio streaming with better error handling and telemetry.
-   * Clears the sound queue by turn ID.
-   * @param {string} turnId - The turn ID.
-   * @returns {Promise<void>}
-   * @throws {Error} If the sound queue fails to clear.
-   */
-  static async clearSoundQueueByTurnId(turnId: string): Promise<void> {
-    try {
-      await ExpoPlayAudioStreamModule.clearSoundQueueByTurnId(turnId);
-    } catch (error) {
-      console.error(error);
-      throw new Error(`Failed to clear sound queue: ${error}`);
-    }
   }
 
   /**
@@ -181,15 +119,7 @@ export class ExpoPlayAudioStream {
   /**
    * Subscribes to audio events emitted during recording/streaming.
    * @param onMicrophoneStream - Callback function that will be called when audio data is received.
-   * The callback receives an AudioDataEvent containing:
-   * - data: Base64 encoded audio data at original sample rate
-   * - data16kHz: Optional base64 encoded audio data resampled to 16kHz
-   * - position: Current position in the audio stream
-   * - fileUri: URI of the recording file
-   * - eventDataSize: Size of the current audio data chunk
-   * - totalSize: Total size of recorded audio so far
    * @returns {Subscription} A subscription object that can be used to unsubscribe from the events
-   * @throws {Error} If encoded audio data is missing from the event
    */
   static subscribeToAudioEvents(
     onMicrophoneStream: (event: AudioDataEvent) => Promise<void>
@@ -214,18 +144,6 @@ export class ExpoPlayAudioStream {
   }
 
   /**
-   * Subscribes to events emitted when a sound chunk has finished playing.
-   * @param onSoundChunkPlayed - Callback function that will be called when a sound chunk is played.
-   * The callback receives a SoundChunkPlayedEventPayload indicating if this was the final chunk.
-   * @returns {Subscription} A subscription object that can be used to unsubscribe from the events.
-   */
-  static subscribeToSoundChunkPlayed(
-    onSoundChunkPlayed: (event: SoundChunkPlayedEventPayload) => Promise<void>
-  ): Subscription {
-    return addSoundChunkPlayedListener(onSoundChunkPlayed);
-  }
-
-  /**
    * Subscribes to events emitted by the audio stream module, for advanced use cases.
    * @param eventName - The name of the event to subscribe to.
    * @param onEvent - Callback function that will be called when the event is emitted.
@@ -236,21 +154,6 @@ export class ExpoPlayAudioStream {
     onEvent: (event: T | undefined) => Promise<void>
   ): Subscription {
     return subscribeToEvent(eventName, onEvent);
-  }
-
-  /**
-   * Sets the sound player configuration.
-   * @param {SoundConfig} config - Configuration options for the sound player.
-   * @returns {Promise<void>}
-   * @throws {Error} If the configuration fails to update.
-   */
-  static async setSoundConfig(config: SoundConfig): Promise<void> {
-    try {
-      await ExpoPlayAudioStreamModule.setSoundConfig(config);
-    } catch (error) {
-      console.error(error);
-      throw new Error(`Failed to set sound configuration: ${error}`);
-    }
   }
 
   /**
@@ -308,15 +211,12 @@ export class ExpoPlayAudioStream {
 
 export {
   AudioDataEvent,
-  SoundChunkPlayedEventPayload,
   DeviceReconnectedReason,
   DeviceReconnectedEventPayload,
   AudioRecording,
   RecordingConfig,
   StartRecordingResult,
   AudioEvents,
-  SuspendSoundEventTurnId,
-  SoundConfig,
   PlaybackMode,
   Encoding,
   EncodingTypes,

@@ -23,10 +23,6 @@ export interface AudioEventPayload {
   frequencyBands?: { low: number; mid: number; high: number };
 }
 
-export type SoundChunkPlayedEventPayload = {
-  isFinal: boolean;
-};
-
 export const DeviceReconnectedReasons = {
   newDeviceAvailable: "newDeviceAvailable",
   oldDeviceUnavailable: "oldDeviceUnavailable",
@@ -42,8 +38,6 @@ export type DeviceReconnectedEventPayload = {
 
 export const AudioEvents = {
   AudioData: "AudioData",
-  SoundChunkPlayed: "SoundChunkPlayed",
-  SoundStarted: "SoundStarted",
   DeviceReconnected: "DeviceReconnected",
 };
 
@@ -51,12 +45,6 @@ export function addAudioEventListener(
   listener: (event: AudioEventPayload) => Promise<void>
 ): EventSubscription {
   return (emitter as any).addListener("AudioData", listener);
-}
-
-export function addSoundChunkPlayedListener(
-  listener: (event: SoundChunkPlayedEventPayload) => Promise<void>
-): EventSubscription {
-  return (emitter as any).addListener("SoundChunkPlayed", listener);
 }
 
 export function subscribeToEvent<T extends unknown>(

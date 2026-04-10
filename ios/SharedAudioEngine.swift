@@ -1,7 +1,7 @@
 import AVFoundation
 
 /// Delegate for receiving engine lifecycle events.
-/// Both SoundPlayer and AudioPipeline implement this
+/// Both AudioPipeline consumers implement this
 /// to handle route changes and interruptions.
 protocol SharedAudioEngineDelegate: AnyObject {
     /// Called after the engine has been restarted due to a route change.
@@ -27,7 +27,7 @@ protocol SharedAudioEngineDelegate: AnyObject {
     func engineDidDie(reason: String)
 }
 
-/// Owns the single AVAudioEngine shared between SoundPlayer and AudioPipeline.
+/// Owns the single AVAudioEngine shared between AudioPipeline consumers.
 ///
 /// Responsibilities:
 ///   - Engine lifecycle (create, start, stop, teardown)
@@ -119,10 +119,12 @@ class SharedAudioEngine {
             Logger.debug("[\(SharedAudioEngine.TAG)] Voice processing enabled")
         }
 
-        // Do NOT explicitly connect mainMixerNode → outputNode.
-        // The engine auto-negotiates the hardware format for that hop,
-        // avoiding IsFormatSampleRateAndChannelCountValid crashes when
-        // the consumer's format doesn't match the hardware sample rate.
+        // Force the output node (and implicitly the graph) to be created
+        // before starting. inputNode/outputNode are lazy — if neither is
+        // accessed, the graph has zero nodes and Initialize crashes with
+        // "inputNode != nullptr || outputNode != nullptr".
+        // The VP path above already accesses both; this covers regular mode.
+        _ = engine.mainMixerNode
 
         try engine.start()
 

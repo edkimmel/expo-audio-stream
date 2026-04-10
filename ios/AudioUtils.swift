@@ -2,13 +2,6 @@ import AVFoundation
 import ExpoModulesCore
 import Accelerate
 
-public enum SoundPlayerError: Error {
-    case invalidBase64String
-    case couldNotPlayAudio
-    case decodeError(details: String)
-    case unsupportedFormat
-}
-
 enum AudioProcessingError: Error {
     case invalidBase64
 }

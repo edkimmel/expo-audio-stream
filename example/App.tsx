@@ -5,7 +5,6 @@ import {
 } from "@edkimmel/expo-audio-stream";
 import { useEffect, useRef, useState } from "react";
 import { sampleA } from "./samples/sample-a";
-import { sampleB } from "./samples/sample-b";
 import type {
   AudioDataEvent,
   FrequencyBands,
@@ -20,9 +19,6 @@ const RECORDING_INTERVAL = 100;
 
 // Sample audio files are encoded at 16kHz
 const SAMPLE_PLAYBACK_RATE = 16000;
-
-const turnId1 = "turnId1";
-const turnId2 = "turnId2";
 
 const chaosMonkey = () => {
   // At random, frequent intervals, busy wait the JS thread for 100-200ms to see how audio playback and pipeline handle JS thread starvation
@@ -75,16 +71,8 @@ export default function App() {
     }
   };
 
-  // Subscribe to sound chunk played events
   useEffect(() => {
-    const sub = ExpoPlayAudioStream.subscribeToSoundChunkPlayed(
-      async (event) => {
-        console.log("Sound chunk played:", event);
-      }
-    );
-
     return () => {
-      sub.remove();
       ExpoPlayAudioStream.destroy().catch();
     };
   }, []);
@@ -92,10 +80,6 @@ export default function App() {
   const connectPipeline = async () => {
     setPipelineError(null);
     try {
-      await ExpoPlayAudioStream.setSoundConfig({
-        sampleRate: SAMPLE_PLAYBACK_RATE,
-        playbackMode: "conversation",
-      });
       const result = await Pipeline.connect({
         sampleRate: SAMPLE_PLAYBACK_RATE,
         channelCount: 1,
@@ -219,48 +203,6 @@ export default function App() {
       <Button onPress={stopChaosMonkey} title="Stop Chaos Monkey" />
       <Spacer />
 
-      {/* ── Sound Playback ──────────────────────────────── */}
-      <Text style={styles.section}>Sound Playback</Text>
-
-      <Button
-        onPress={async () => {
-          await ExpoPlayAudioStream.setSoundConfig({
-            sampleRate: SAMPLE_PLAYBACK_RATE,
-            playbackMode: "conversation",
-          });
-          await ExpoPlayAudioStream.playSound(sampleB, turnId1);
-        }}
-        title="Play Sample B (turn 1)"
-      />
-      <Spacer />
-
-      <Button
-        onPress={async () => {
-          await ExpoPlayAudioStream.setSoundConfig({
-            sampleRate: SAMPLE_PLAYBACK_RATE,
-            playbackMode: "conversation",
-          });
-          await ExpoPlayAudioStream.playSound(sampleA, turnId2);
-        }}
-        title="Play Sample A (turn 2)"
-      />
-      <Spacer />
-
-      <Button
-        onPress={async () => {
-          await ExpoPlayAudioStream.stopSound();
-        }}
-        title="Stop Sound"
-      />
-      <Spacer />
-
-      <Button
-        onPress={async () => {
-          await ExpoPlayAudioStream.clearSoundQueueByTurnId(turnId1);
-        }}
-        title="Clear Turn 1 Queue"
-      />
-
       {/* ── Microphone ─────────────────────────────────── */}
       <Text style={styles.section}>Microphone</Text>
 
@@ -339,11 +281,12 @@ export default function App() {
       <Spacer />
 
       <Button onPress={disconnectPipeline} title="Disconnect Pipeline" />
-
       <Spacer />
+
+      {/* ── Race condition tests ─────────────────────────── */}
       <Button
         onPress={async () => {
-          // Race 1: disconnect + destroy fired back-to-back (no await between)
+          // Race: disconnect + destroy fired back-to-back (no await between)
           console.log("[Race Test] disconnect + destroy (no await)");
           Pipeline.disconnect().catch((e: unknown) =>
             console.log("[Race Test] disconnect error (expected):", e)
@@ -357,7 +300,7 @@ export default function App() {
       <Spacer />
       <Button
         onPress={async () => {
-          // Race 2: rapid connect→disconnect cycle
+          // Race: rapid connect→disconnect cycle
           console.log("[Race Test] rapid connect/disconnect x5");
           for (let i = 0; i < 5; i++) {
             Pipeline.connect({
@@ -378,7 +321,7 @@ export default function App() {
       <Spacer />
       <Button
         onPress={async () => {
-          // Race 3: push audio while disconnecting
+          // Race: push audio while disconnecting
           console.log("[Race Test] push + disconnect simultaneous");
           await Pipeline.connect({
             sampleRate: SAMPLE_PLAYBACK_RATE,
@@ -400,30 +343,6 @@ export default function App() {
           );
         }}
         title="Race: push + disconnect"
-      />
-      <Spacer />
-      <Button
-        onPress={async () => {
-          // Race 4: connect pipeline while playing sound (both configure the shared engine)
-          console.log("[Race Test] playSound + connectPipeline simultaneous");
-          ExpoPlayAudioStream.setSoundConfig({
-            sampleRate: SAMPLE_PLAYBACK_RATE,
-            playbackMode: "regular",
-          }).then(() =>
-            ExpoPlayAudioStream.playSound(sampleA, "race-sound-turn")
-          ).catch((e: unknown) =>
-            console.log("[Race Test] playSound error (expected):", e)
-          );
-          Pipeline.connect({
-            sampleRate: SAMPLE_PLAYBACK_RATE,
-            channelCount: 1,
-            targetBufferMs: 80,
-            playbackMode: "conversation",
-          }).catch((e: unknown) =>
-            console.log("[Race Test] connect error (expected):", e)
-          );
-        }}
-        title="Race: playSound + connectPipeline"
       />
 
       <Text style={styles.status}>Pipeline: {pipelineState}</Text>

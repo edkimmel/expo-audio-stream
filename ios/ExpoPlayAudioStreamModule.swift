@@ -3,17 +3,14 @@ import AVFoundation
 import ExpoModulesCore
 
 let audioDataEvent: String = "AudioData"
-let soundIsPlayedEvent: String = "SoundChunkPlayed"
-let soundIsStartedEvent: String = "SoundStarted"
 let deviceReconnectedEvent: String = "DeviceReconnected"
 
 
-public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPlayerDelegate, PipelineEventSender {
+public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, PipelineEventSender {
     private var _microphone: Microphone?
-    private var _soundPlayer: SoundPlayer?
     private var _pipelineIntegration: PipelineIntegration?
 
-    /// Single shared AVAudioEngine used by both SoundPlayer and AudioPipeline.
+    /// Single shared AVAudioEngine used by AudioPipeline.
     private let sharedAudioEngine = SharedAudioEngine()
 
     private var microphone: Microphone {
@@ -22,15 +19,6 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             _microphone?.delegate = self
         }
         return _microphone!
-    }
-
-    private var soundPlayer: SoundPlayer {
-        if _soundPlayer == nil {
-            _soundPlayer = SoundPlayer()
-            _soundPlayer?.delegate = self
-            _soundPlayer?.setSharedEngine(sharedAudioEngine)
-        }
-        return _soundPlayer!
     }
 
     private var pipelineIntegration: PipelineIntegration {
@@ -53,8 +41,6 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
         // Defines event names that the module can send to JavaScript.
         Events([
             audioDataEvent,
-            soundIsPlayedEvent,
-            soundIsStartedEvent,
             deviceReconnectedEvent,
             PipelineIntegration.EVENT_STATE_CHANGED,
             PipelineIntegration.EVENT_PLAYBACK_STARTED,
@@ -77,7 +63,6 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
                 self.isAudioSessionInitialized = false
             }
             self._microphone = nil
-            self._soundPlayer = nil
             promise.resolve(nil)
         }
 
@@ -109,55 +94,12 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             ])
         }
 
-        AsyncFunction("playSound") { (base64Chunk: String, turnId: String, encoding: String?, promise: Promise) in
-            Logger.debug("Play sound")
-            do {
-                if !isAudioSessionInitialized {
-                    try ensureAudioSessionInitialized()
-                }
-
-                // Ensure shared engine is configured (playSound may be called without setSoundConfig)
-                if !self.sharedAudioEngine.isConfigured {
-                    try self.sharedAudioEngine.configure(playbackMode: .regular)
-                    self.sharedAudioEngine.addDelegate(self.soundPlayer)
-                }
-
-                // Determine the audio format based on the encoding parameter
-                let commonFormat: AVAudioCommonFormat
-                switch encoding {
-                case "pcm_f32le":
-                    commonFormat = .pcmFormatFloat32
-                case "pcm_s16le", nil:
-                    commonFormat = .pcmFormatInt16
-                default:
-                    Logger.debug("[ExpoPlayAudioStreamModule] Unsupported encoding: \(encoding ?? "nil"), defaulting to PCM_S16LE")
-                    commonFormat = .pcmFormatInt16
-                }
-
-                try soundPlayer.play(audioChunk: base64Chunk, turnId: turnId, resolver: {
-                    _ in promise.resolve(nil)
-                }, rejecter: {code, message, error in
-                    promise.reject(code ?? "ERR_UNKNOWN", message ?? "Unknown error")
-                }, commonFormat: commonFormat)
-            } catch {
-                print("Error enqueuing audio: \(error.localizedDescription)")
-            }
-        }
-
-        AsyncFunction("stopSound") { (promise: Promise) in
-            soundPlayer.stop(promise)
-        }
-
-        AsyncFunction("clearSoundQueueByTurnId") { (turnId: String, promise: Promise) in
-            soundPlayer.clearSoundQueue(turnIdToClear: turnId, resolver: promise)
-        }
-
         AsyncFunction("startMicrophone") { (options: [String: Any], promise: Promise) in
             // Create recording settings
             // Extract settings from provided options, using default values if necessary
-            let sampleRate = options["sampleRate"] as? Double ?? 16000.0 // it fails if not 48000, why?
-            let numberOfChannels = options["channelConfig"] as? Int ?? 1 // Mono channel configuration
-            let bitDepth = options["audioFormat"] as? Int ?? 16 // 16bits
+            let sampleRate = options["sampleRate"] as? Double ?? 16000.0
+            let numberOfChannels = options["channelConfig"] as? Int ?? 1
+            let bitDepth = options["audioFormat"] as? Int ?? 16
             let interval = options["interval"] as? Int ?? 1000
 
             let fbConfigDict = options["frequencyBandConfig"] as? [String: Any]
@@ -204,73 +146,12 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             }
         }
 
-        /// Stops the microphone recording and releases associated resources
-        /// - Parameter promise: A promise to resolve when microphone recording is stopped
-        /// - Note: This method stops the active recording session, processes any remaining audio data,
-        ///         and releases hardware resources. It should be called when the app no longer needs
-        ///         microphone access to conserve battery and system resources.
         AsyncFunction("stopMicrophone") { (promise: Promise) in
             microphone.stopRecording(resolver: promise)
         }
 
         Function("toggleSilence") { (isSilent: Bool) in
             microphone.toggleSilence(isSilent: isSilent)
-        }
-
-        /// Sets the sound player configuration
-        /// - Parameters:
-        ///   - config: A dictionary containing configuration options:
-        ///     - `sampleRate`: The sample rate for audio playback (default is 16000.0).
-        ///     - `playbackMode`: The playback mode ("regular", "voiceProcessing", or "conversation").
-        ///     - `useDefault`: When true, resets to default configuration regardless of other parameters.
-        ///   - promise: A promise to resolve when configuration is updated or reject with an error.
-        AsyncFunction("setSoundConfig") { (config: [String: Any], promise: Promise) in
-            // Check if we should use default configuration
-            let useDefault = config["useDefault"] as? Bool ?? false
-
-            do {
-                if !isAudioSessionInitialized {
-                    try ensureAudioSessionInitialized()
-                }
-
-                if useDefault {
-                    // Reset to default configuration — configure engine for regular mode
-                    Logger.debug("[ExpoPlayAudioStreamModule] Resetting sound configuration to default values")
-                    try self.sharedAudioEngine.configure(playbackMode: .regular)
-                    self.sharedAudioEngine.addDelegate(self.soundPlayer)
-                    try soundPlayer.resetConfigToDefault()
-                } else {
-                    // Extract configuration values from the provided dictionary
-                    let sampleRate = config["sampleRate"] as? Double ?? 16000.0
-                    let playbackModeString = config["playbackMode"] as? String ?? "regular"
-
-                    // Convert string playback mode to enum
-                    let playbackMode: PlaybackMode
-                    switch playbackModeString {
-                    case "voiceProcessing":
-                        playbackMode = .voiceProcessing
-                    case "conversation":
-                        playbackMode = .conversation
-                    default:
-                        playbackMode = .regular
-                    }
-
-                    // Configure shared engine first (handles voice processing)
-                    try self.sharedAudioEngine.configure(playbackMode: playbackMode)
-                    self.sharedAudioEngine.addDelegate(self.soundPlayer)
-
-                    // Create a new SoundConfig object
-                    let soundConfig = SoundConfig(sampleRate: sampleRate, playbackMode: playbackMode)
-
-                    // Update the sound player configuration (attaches node to shared engine)
-                    Logger.debug("[ExpoPlayAudioStreamModule] Setting sound configuration - sampleRate: \(sampleRate), playbackMode: \(playbackModeString)")
-                    try soundPlayer.updateConfig(soundConfig)
-                }
-
-                promise.resolve(nil)
-            } catch {
-                promise.reject("ERROR_CONFIG_UPDATE", "Failed to set sound configuration: \(error.localizedDescription)")
-            }
         }
 
         // ── Pipeline functions ────────────────────────────────────────────
@@ -353,10 +234,8 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
         if let settings = recordingSettings {
             try audioSession.setPreferredSampleRate(settings.sampleRate)
-            // Set IO buffer duration short enough to support the desired emission interval.
-            // Use the hardware sample rate (not the desired rate) since this is a hardware-level setting.
             let hwSampleRate = audioSession.sampleRate > 0 ? audioSession.sampleRate : 48000.0
-            let preferredDuration = 512.0 / hwSampleRate  // ~10.7ms at 48kHz
+            let preferredDuration = 512.0 / hwSampleRate
             try audioSession.setPreferredIOBufferDuration(preferredDuration)
         }
         try audioSession.setActive(true)
@@ -396,7 +275,6 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
 
     func onMicrophoneData(_ microphoneData: Data, _ soundLevel: Float?, _ frequencyBands: FrequencyBands?) {
         let encodedData = microphoneData.base64EncodedString()
-        // Construct the event payload similar to Android
         var eventBody: [String: Any] = [
             "fileUri": "",
             "lastEmittedSize": 0,
@@ -414,7 +292,6 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
                 "high": bands.high
             ]
         }
-        // Emit the event to JavaScript
         sendEvent(audioDataEvent, eventBody)
     }
 
@@ -441,13 +318,5 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
         }
 
         sendEvent(deviceReconnectedEvent, ["reason": reasonString])
-    }
-
-    func onSoundChunkPlayed(_ isFinal: Bool) {
-        sendEvent(soundIsPlayedEvent, ["isFinal": isFinal])
-    }
-
-    func onSoundStartedPlaying() {
-        sendEvent(soundIsStartedEvent)
     }
 }

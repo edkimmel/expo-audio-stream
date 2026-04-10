@@ -24,7 +24,6 @@ import expo.modules.audiostream.pipeline.PipelineIntegration
 
 class ExpoPlayAudioStreamModule : Module(), EventSender {
     private lateinit var audioRecorderManager: AudioRecorderManager
-    private lateinit var audioPlaybackManager: AudioPlaybackManager
     private lateinit var audioManager: AudioManager
     private lateinit var pipelineIntegration: PipelineIntegration
 
@@ -81,7 +80,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
                 val matched = lastOfGroup.map { "${it.productName} (type=${it.type})" }
                 Log.d("ExpoAudioCallback", "AudioDeviceCallback ➜ REMOVED (interesting): $matched")
                 pipelineIntegration.logAudioTrackHealth("device_removed")
-                audioPlaybackManager.stopPlayback(null)
                 val params = Bundle()
                 params.putString("reason", "oldDeviceUnavailable")
                 sendExpoEvent(Constants.DEVICE_RECONNECTED_EVENT_NAME, params)
@@ -96,8 +94,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
 
         Events(
             Constants.AUDIO_EVENT_NAME,
-            Constants.SOUND_CHUNK_PLAYED_EVENT_NAME,
-            Constants.SOUND_STARTED_EVENT_NAME,
             Constants.DEVICE_RECONNECTED_EVENT_NAME,
             PipelineIntegration.EVENT_STATE_CHANGED,
             PipelineIntegration.EVENT_PLAYBACK_STARTED,
@@ -110,9 +106,8 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             PipelineIntegration.EVENT_FREQUENCY_BANDS
         )
 
-        // Initialize managers for playback and for recording
+        // Initialize managers
         initializeManager()
-        initializePlaybackManager()
         initializePipeline()
 
         OnCreate {
@@ -126,19 +121,16 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             // Module is being destroyed (app shutdown)
             // Just clean up resources without reinitialization
             pipelineIntegration.destroy()
-            audioPlaybackManager.runOnDispose()
             audioRecorderManager.release()
         }
 
         AsyncFunction("destroy") { promise: Promise ->
             // User explicitly called destroy - clean up and reinitialize for reuse
             pipelineIntegration.destroy()
-            audioPlaybackManager.runOnDispose()
             audioRecorderManager.release()
 
             // Reinitialize all managers so the module can be used again
             initializeManager()
-            initializePlaybackManager()
             initializePipeline()
             promise.resolve(null)
         }
@@ -159,25 +151,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             )
         }
 
-        AsyncFunction("playSound") { chunk: String, turnId: String, encoding: String?, promise: Promise ->
-            val pcmEncoding = when (encoding) {
-                "pcm_f32le" -> PCMEncoding.PCM_F32LE
-                "pcm_s16le", null -> PCMEncoding.PCM_S16LE
-                else -> {
-                    Log.d(Constants.TAG, "Unsupported encoding: $encoding, defaulting to PCM_S16LE")
-                    PCMEncoding.PCM_S16LE
-                }
-            }
-            audioPlaybackManager.playAudio(chunk, turnId, promise, pcmEncoding)
-        }
-
-        AsyncFunction("stopSound") { promise: Promise -> audioPlaybackManager.stopPlayback(promise) }
-
-        AsyncFunction("clearSoundQueueByTurnId") { turnId: String, promise: Promise ->
-            audioPlaybackManager.setCurrentTurnId(turnId)
-            promise.resolve(null)
-        }
-
         AsyncFunction("startMicrophone") { options: Map<String, Any?>, promise: Promise ->
             audioRecorderManager.startRecording(options, promise)
         }
@@ -189,34 +162,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         Function("toggleSilence") { isSilent: Boolean ->
             // Just toggle silence without returning any value
             audioRecorderManager.toggleSilence(isSilent)
-        }
-
-        AsyncFunction("setSoundConfig") { config: Map<String, Any?>, promise: Promise ->
-            val useDefault = config["useDefault"] as? Boolean ?: false
-
-            if (useDefault) {
-                // Reset to default configuration
-                Log.d(Constants.TAG, "Resetting sound configuration to default values")
-                audioPlaybackManager.resetConfigToDefault(promise)
-            } else {
-                // Extract configuration values
-                val sampleRate = (config["sampleRate"] as? Number)?.toInt() ?: 16000
-                val playbackModeString = config["playbackMode"] as? String ?: "regular"
-
-                // Convert string playback mode to enum
-                val playbackMode = when (playbackModeString) {
-                    "voiceProcessing" -> PlaybackMode.VOICE_PROCESSING
-                    "conversation" -> PlaybackMode.CONVERSATION
-                    else -> PlaybackMode.REGULAR
-                }
-
-                // Create a new SoundConfig object
-                val soundConfig = SoundConfig(sampleRate = sampleRate, playbackMode = playbackMode)
-
-                // Update the sound player configuration
-                Log.d(Constants.TAG, "Setting sound configuration - sampleRate: $sampleRate, playbackMode: $playbackModeString")
-                audioPlaybackManager.updateConfig(soundConfig, promise)
-            }
         }
 
         // ── Native Audio Pipeline V3 ────────────────────────────────────
@@ -263,10 +208,6 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
                 this,
                 audioEffectsManager
             )
-    }
-
-    private fun initializePlaybackManager() {
-        audioPlaybackManager = AudioPlaybackManager(this)
     }
 
     private fun initializePipeline() {
