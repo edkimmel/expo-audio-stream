@@ -130,7 +130,7 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             audioRecorderManager.release()
         }
 
-        Function("destroy") {
+        AsyncFunction("destroy") { promise: Promise ->
             // User explicitly called destroy - clean up and reinitialize for reuse
             pipelineIntegration.destroy()
             audioPlaybackManager.runOnDispose()
@@ -140,6 +140,7 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             initializeManager()
             initializePlaybackManager()
             initializePipeline()
+            promise.resolve(null)
         }
 
         AsyncFunction("requestPermissionsAsync") { promise: Promise ->

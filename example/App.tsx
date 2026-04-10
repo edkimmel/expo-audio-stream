@@ -85,7 +85,7 @@ export default function App() {
 
     return () => {
       sub.remove();
-      ExpoPlayAudioStream.destroy();
+      ExpoPlayAudioStream.destroy().catch();
     };
   }, []);
 
@@ -339,6 +339,92 @@ export default function App() {
       <Spacer />
 
       <Button onPress={disconnectPipeline} title="Disconnect Pipeline" />
+
+      <Spacer />
+      <Button
+        onPress={async () => {
+          // Race 1: disconnect + destroy fired back-to-back (no await between)
+          console.log("[Race Test] disconnect + destroy (no await)");
+          Pipeline.disconnect().catch((e: unknown) =>
+            console.log("[Race Test] disconnect error (expected):", e)
+          );
+          ExpoPlayAudioStream.destroy().catch((e: unknown) =>
+            console.log("[Race Test] destroy error (expected):", e)
+          );
+        }}
+        title="Race: disconnect + destroy"
+      />
+      <Spacer />
+      <Button
+        onPress={async () => {
+          // Race 2: rapid connect→disconnect cycle
+          console.log("[Race Test] rapid connect/disconnect x5");
+          for (let i = 0; i < 5; i++) {
+            Pipeline.connect({
+              sampleRate: SAMPLE_PLAYBACK_RATE,
+              channelCount: 1,
+              targetBufferMs: 80,
+              playbackMode: "conversation",
+            }).catch((e: unknown) =>
+              console.log(`[Race Test] connect ${i} error (expected):`, e)
+            );
+            Pipeline.disconnect().catch((e: unknown) =>
+              console.log(`[Race Test] disconnect ${i} error (expected):`, e)
+            );
+          }
+        }}
+        title="Race: connect/disconnect x5"
+      />
+      <Spacer />
+      <Button
+        onPress={async () => {
+          // Race 3: push audio while disconnecting
+          console.log("[Race Test] push + disconnect simultaneous");
+          await Pipeline.connect({
+            sampleRate: SAMPLE_PLAYBACK_RATE,
+            channelCount: 1,
+            targetBufferMs: 80,
+            playbackMode: "conversation",
+          });
+          // Fire push and disconnect without awaiting
+          for (let i = 0; i < 10; i++) {
+            Pipeline.pushAudioSync({
+              audio: sampleA,
+              turnId: "race-turn",
+              isFirstChunk: i === 0,
+              isLastChunk: i === 9,
+            });
+          }
+          Pipeline.disconnect().catch((e: unknown) =>
+            console.log("[Race Test] disconnect error (expected):", e)
+          );
+        }}
+        title="Race: push + disconnect"
+      />
+      <Spacer />
+      <Button
+        onPress={async () => {
+          // Race 4: connect pipeline while playing sound (both configure the shared engine)
+          console.log("[Race Test] playSound + connectPipeline simultaneous");
+          ExpoPlayAudioStream.setSoundConfig({
+            sampleRate: SAMPLE_PLAYBACK_RATE,
+            playbackMode: "regular",
+          }).then(() =>
+            ExpoPlayAudioStream.playSound(sampleA, "race-sound-turn")
+          ).catch((e: unknown) =>
+            console.log("[Race Test] playSound error (expected):", e)
+          );
+          Pipeline.connect({
+            sampleRate: SAMPLE_PLAYBACK_RATE,
+            channelCount: 1,
+            targetBufferMs: 80,
+            playbackMode: "conversation",
+          }).catch((e: unknown) =>
+            console.log("[Race Test] connect error (expected):", e)
+          );
+        }}
+        title="Race: playSound + connectPipeline"
+      />
 
       <Text style={styles.status}>Pipeline: {pipelineState}</Text>
       {pipelineBands && <BandMeter label="Pipeline Bands" bands={pipelineBands} />}

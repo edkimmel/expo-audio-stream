@@ -48,8 +48,8 @@ export class ExpoPlayAudioStream {
    * This should be called when the module is no longer needed.
    * It will reset all internal state and release audio resources.
    */
-  static destroy() {
-    ExpoPlayAudioStreamModule.destroy();
+  static async destroy() {
+    await ExpoPlayAudioStreamModule.destroy();
   }
 
   /**

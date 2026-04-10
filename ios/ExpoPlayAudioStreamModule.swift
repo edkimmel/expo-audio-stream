@@ -67,7 +67,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             PipelineIntegration.EVENT_FREQUENCY_BANDS,
         ])
 
-        Function("destroy") {
+        AsyncFunction("destroy") { (promise: Promise) in
             self._pipelineIntegration?.destroy()
             self._pipelineIntegration = nil
             self.sharedAudioEngine.teardown()
@@ -78,6 +78,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, SoundPla
             }
             self._microphone = nil
             self._soundPlayer = nil
+            promise.resolve(nil)
         }
 
         /// Prompts the user to select the microphone mode.
