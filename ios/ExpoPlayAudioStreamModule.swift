@@ -162,16 +162,15 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
                     try self.ensureAudioSessionInitialized()
                 }
 
-                // Parse playback mode from options to configure shared engine
-                let playbackModeString = options["playbackMode"] as? String ?? "regular"
+                // Parse playback mode from options to configure shared engine.
+                // Always use VP — this library is meant for mic+speaker combos.
+                let playbackModeString = options["playbackMode"] as? String ?? "conversation"
                 let playbackMode: PlaybackMode
                 switch playbackModeString {
                 case "voiceProcessing":
                     playbackMode = .voiceProcessing
-                case "conversation":
-                    playbackMode = .conversation
                 default:
-                    playbackMode = .regular
+                    playbackMode = .conversation
                 }
 
                 // Configure shared engine (handles voice processing)

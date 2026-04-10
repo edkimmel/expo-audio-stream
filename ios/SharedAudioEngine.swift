@@ -38,18 +38,14 @@ protocol SharedAudioEngineDelegate: AnyObject {
 /// Consumers attach their own AVAudioPlayerNode via `attachNode(_:format:)`.
 /// The mixer handles sample-rate conversion from each node's format to the
 /// hardware output format automatically.
-///
-/// All public methods are serialized on an internal queue to prevent races
-/// between Expo async-function calls, notification handlers, and teardown.
 class SharedAudioEngine {
     private static let TAG = "SharedAudioEngine"
 
-    /// Serial queue that protects all engine / node / state mutations.
-    private let queue = DispatchQueue(label: "expo.audio.SharedAudioEngine")
+    private let lock = NSRecursiveLock()
 
     // ── Engine state ─────────────────────────────────────────────────────
     private(set) var engine: AVAudioEngine?
-    private(set) var playbackMode: PlaybackMode = .regular
+    private(set) var playbackMode: PlaybackMode = .conversation
     private(set) var isConfigured = false
 
     /// All registered consumers receive route-change and interruption callbacks.
@@ -57,11 +53,17 @@ class SharedAudioEngine {
     private let delegates = NSHashTable<AnyObject>.weakObjects()
 
     func addDelegate(_ d: SharedAudioEngineDelegate) {
-        queue.sync { delegates.add(d as AnyObject) }
+        lock.lock()
+        defer { lock.unlock() }
+        if !delegates.contains(d as AnyObject) {
+            delegates.add(d as AnyObject)
+        }
     }
 
     func removeDelegate(_ d: SharedAudioEngineDelegate) {
-        queue.sync { delegates.remove(d as AnyObject) }
+        lock.lock()
+        defer { lock.unlock() }
+        delegates.remove(d as AnyObject)
     }
 
     private func notifyDelegates(_ block: (SharedAudioEngineDelegate) -> Void) {
@@ -90,10 +92,8 @@ class SharedAudioEngine {
     ///
     /// - Parameter playbackMode: Determines whether voice processing is enabled.
     func configure(playbackMode: PlaybackMode) throws {
-        try queue.sync { try _configure(playbackMode: playbackMode) }
-    }
-
-    private func _configure(playbackMode: PlaybackMode) throws {
+        lock.lock()
+        defer { lock.unlock() }
         if isConfigured && self.playbackMode == playbackMode && engine?.isRunning == true {
             Logger.debug("[\(SharedAudioEngine.TAG)] Already configured for \(playbackMode) and engine running, skipping")
             return
@@ -105,7 +105,7 @@ class SharedAudioEngine {
 
         // Tear down existing engine (keeps attachedNodes info for re-attach)
         let previousNodes = attachedNodes
-        _teardown()
+        teardown()
 
         Logger.debug("[\(SharedAudioEngine.TAG)] Configuring engine — playbackMode=\(playbackMode)")
 
@@ -119,12 +119,10 @@ class SharedAudioEngine {
             Logger.debug("[\(SharedAudioEngine.TAG)] Voice processing enabled")
         }
 
-        // Force the output node (and implicitly the graph) to be created
-        // before starting. inputNode/outputNode are lazy — if neither is
-        // accessed, the graph has zero nodes and Initialize crashes with
-        // "inputNode != nullptr || outputNode != nullptr".
-        // The VP path above already accesses both; this covers regular mode.
-        _ = engine.mainMixerNode
+        // VP accesses inputNode/outputNode above, which creates the graph.
+        // Do NOT access mainMixerNode here — inserting the mixer after
+        // setVoiceProcessingEnabled disrupts VoiceProcessingIO's internal
+        // graph and causes scheduleBuffer completions to never fire.
 
         try engine.start()
 
@@ -142,7 +140,7 @@ class SharedAudioEngine {
 
         // Re-attach any nodes that were connected before reconfiguration
         for info in previousNodes {
-            _attachNode(info.node, format: info.format)
+            attachNode(info.node, format: info.format)
             info.node.play()
         }
 
@@ -162,10 +160,8 @@ class SharedAudioEngine {
     /// Connects `node → mainMixerNode` with the given format.
     /// The mixer handles sample-rate conversion to hardware output.
     func attachNode(_ node: AVAudioPlayerNode, format: AVAudioFormat) {
-        queue.sync { _attachNode(node, format: format) }
-    }
-
-    private func _attachNode(_ node: AVAudioPlayerNode, format: AVAudioFormat) {
+        lock.lock()
+        defer { lock.unlock() }
         guard let engine = engine else {
             Logger.debug("[\(SharedAudioEngine.TAG)] attachNode called but engine is nil")
             return
@@ -180,25 +176,23 @@ class SharedAudioEngine {
 
     /// Detach a consumer's player node from the shared engine.
     func detachNode(_ node: AVAudioPlayerNode) {
-        queue.sync { _detachNode(node) }
-    }
-
-    private func _detachNode(_ node: AVAudioPlayerNode) {
+        lock.lock()
+        defer { lock.unlock() }
         guard let engine = engine else { return }
 
+        node.pause()
+        node.stop()
+
+        // Only disconnect/detach if the node is still attached to this engine.
+        // The node may already have been removed (e.g. engine died, concurrent
+        // teardown, or duplicate disconnect call).
         if node.engine === engine {
             engine.disconnectNodeOutput(node)
             engine.detach(node)
         }
         attachedNodes.removeAll { $0.node === node }
 
-        // Stop the engine if no nodes remain — no reason to keep it running.
-        if attachedNodes.isEmpty && engine.isRunning {
-            engine.stop()
-            Logger.debug("[\(SharedAudioEngine.TAG)] Node detached, engine stopped (no remaining nodes)")
-        } else {
-            Logger.debug("[\(SharedAudioEngine.TAG)] Node detached")
-        }
+        Logger.debug("[\(SharedAudioEngine.TAG)] Node detached")
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -207,31 +201,21 @@ class SharedAudioEngine {
 
     /// Tear down the engine completely. Called on reconfigure or module destroy.
     func teardown() {
-        queue.sync { _teardown() }
-    }
-
-    private func _teardown() {
+        lock.lock()
+        defer { lock.unlock() }
         // Remove observers
         NotificationCenter.default.removeObserver(
             self, name: AVAudioSession.routeChangeNotification, object: nil)
         NotificationCenter.default.removeObserver(
             self, name: AVAudioSession.interruptionNotification, object: nil)
 
-        // Disable voice processing BEFORE stopping so the system begins
-        // swapping VoiceProcessingIO back to RemoteIO while we clean up.
-        // Without this, a new engine created immediately after teardown can
-        // crash in Initialize (inputNode/outputNode both nil) because the
-        // IO unit is still mid-swap.
-        if playbackMode == .conversation || playbackMode == .voiceProcessing {
-            if let engine = engine {
-                try? engine.inputNode.setVoiceProcessingEnabled(false)
-                try? engine.outputNode.setVoiceProcessingEnabled(false)
-            }
-        }
-
-        engine?.stop()
+        // Detach all tracked nodes
         if let engine = engine {
             for info in attachedNodes {
+                info.node.pause()
+                info.node.stop()
+                // Guard against nodes already removed from engine (e.g. engine
+                // died or node was detached by a concurrent disconnect call).
                 if info.node.engine === engine {
                     engine.disconnectNodeOutput(info.node)
                     engine.detach(info.node)
@@ -240,6 +224,15 @@ class SharedAudioEngine {
         }
         attachedNodes.removeAll()
 
+        // Disable voice processing before stopping
+        if playbackMode == .conversation || playbackMode == .voiceProcessing {
+            if let engine = engine {
+                try? engine.inputNode.setVoiceProcessingEnabled(false)
+                try? engine.outputNode.setVoiceProcessingEnabled(false)
+            }
+        }
+
+        engine?.stop()
         engine = nil
         isConfigured = false
 
@@ -260,12 +253,9 @@ class SharedAudioEngine {
             return
         }
 
-        queue.async { [weak self] in
-            self?._handleRouteChange(reason: reason)
-        }
-    }
+        lock.lock()
+        defer { lock.unlock() }
 
-    private func _handleRouteChange(reason: AVAudioSession.RouteChangeReason) {
         let routeDescription = AVAudioSession.sharedInstance().currentRoute.outputs
             .map { "\($0.portName) (\($0.portType.rawValue))" }
             .joined(separator: ", ")
@@ -285,7 +275,14 @@ class SharedAudioEngine {
             // Suppress completion handlers from node.stop() re-entering the scheduling loop
             isRebuildingForRouteChange = true
 
-            // 1. Stop engine
+            // 1. Stop all attached nodes (completion handlers fire but are gated)
+            for info in attachedNodes {
+                Logger.debug("[\(SharedAudioEngine.TAG)] Stopping node — isPlaying=\(info.node.isPlaying)")
+                info.node.pause()
+                info.node.stop()
+            }
+
+            // 2. Stop engine
             if engine.isRunning {
                 engine.stop()
                 Logger.debug("[\(SharedAudioEngine.TAG)] Engine stopped")
@@ -293,7 +290,7 @@ class SharedAudioEngine {
                 Logger.debug("[\(SharedAudioEngine.TAG)] Engine was already stopped")
             }
 
-            // 2. Detach all nodes
+            // 3. Detach all nodes
             for info in attachedNodes {
                 if info.node.engine === engine {
                     engine.disconnectNodeOutput(info.node)
@@ -302,7 +299,7 @@ class SharedAudioEngine {
             }
             Logger.debug("[\(SharedAudioEngine.TAG)] Nodes detached (\(attachedNodes.count))")
 
-            // 3. Re-enable voice processing (resets after engine stop)
+            // 4. Re-enable voice processing (resets after engine stop)
             if playbackMode == .conversation || playbackMode == .voiceProcessing {
                 do {
                     try engine.inputNode.setVoiceProcessingEnabled(true)
@@ -312,14 +309,14 @@ class SharedAudioEngine {
                 }
             }
 
-            // 4. Re-attach all nodes
+            // 5. Re-attach all nodes
             for info in attachedNodes {
                 engine.attach(info.node)
                 engine.connect(info.node, to: engine.mainMixerNode, format: info.format)
             }
             Logger.debug("[\(SharedAudioEngine.TAG)] Nodes re-attached (\(attachedNodes.count))")
 
-            // 5. Reactivate session and restart engine with retry.
+            // 6. Reactivate session and restart engine with retry.
             // Voice processing mode switches the underlying audio unit (RemoteIO ↔
             // VoiceProcessingIO). This swap completes asynchronously — if we call
             // engine.start() immediately, the engine appears to start (isRunning=true)
@@ -330,7 +327,7 @@ class SharedAudioEngine {
                 ? [0.15, 0.3, 0.6]   // 150ms, 300ms, 600ms pre-start delay for VP mode (+100ms post-start verify)
                 : [0.0, 0.1, 0.25]   // immediate, then backoff for non-VP (+50ms post-start verify)
 
-            _attemptRestart(engine: engine, retryDelays: retryDelays, attempt: 0)
+            self.attemptRestart(engine: engine, retryDelays: retryDelays, attempt: 0)
 
         case .categoryChange:
             Logger.debug("[\(SharedAudioEngine.TAG)] Audio session category changed")
@@ -343,14 +340,12 @@ class SharedAudioEngine {
     /// is truly running and nodes are playing before declaring success.
     /// On final failure, falls back to a full rebuild. If that also fails,
     /// tears down everything and notifies delegates via `engineDidDie`.
-    ///
-    /// Must be called on `queue`.
-    private func _attemptRestart(engine: AVAudioEngine, retryDelays: [TimeInterval], attempt: Int) {
+    private func attemptRestart(engine: AVAudioEngine, retryDelays: [TimeInterval], attempt: Int) {
         guard attempt < retryDelays.count else {
             // Exhausted in-place retries — try a full rebuild as last resort
             Logger.debug("[\(SharedAudioEngine.TAG)] All \(retryDelays.count) restart attempts failed — attempting full rebuild")
             isRebuildingForRouteChange = false
-            _rebuildEngine()
+            rebuildEngine()
             return
         }
 
@@ -381,7 +376,7 @@ class SharedAudioEngine {
                 }
             } catch {
                 Logger.debug("[\(SharedAudioEngine.TAG)] engine.start() threw on attempt \(attempt + 1): \(error)")
-                self._attemptRestart(engine: engine, retryDelays: retryDelays, attempt: attempt + 1)
+                self.attemptRestart(engine: engine, retryDelays: retryDelays, attempt: attempt + 1)
                 return
             }
 
@@ -400,14 +395,14 @@ class SharedAudioEngine {
                 // Failed immediately — no point waiting, retry now
                 Logger.debug("[\(SharedAudioEngine.TAG)] Restart attempt \(attempt + 1) failed immediately")
                 if engine.isRunning { engine.stop() }
-                self._attemptRestart(engine: engine, retryDelays: retryDelays, attempt: attempt + 1)
+                self.attemptRestart(engine: engine, retryDelays: retryDelays, attempt: attempt + 1)
                 return
             }
 
             // Voice processing can cause the engine to die asynchronously after
-            // appearing to start. Wait then re-verify before declaring success.
+            // appearing to start. Wait 100ms then re-verify before declaring success.
             let verifyDelay: TimeInterval = (self.playbackMode == .conversation || self.playbackMode == .voiceProcessing) ? 0.1 : 0.05
-            self.queue.asyncAfter(deadline: .now() + verifyDelay) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + verifyDelay) { [weak self] in
                 guard let self = self, let engine = self.engine else {
                     self?.isRebuildingForRouteChange = false
                     return
@@ -436,9 +431,9 @@ class SharedAudioEngine {
                     if isVP {
                         Logger.debug("[\(SharedAudioEngine.TAG)] VP mode — skipping remaining in-place retries, going to full rebuild")
                         self.isRebuildingForRouteChange = false
-                        self._rebuildEngine()
+                        self.rebuildEngine()
                     } else {
-                        self._attemptRestart(engine: engine, retryDelays: retryDelays, attempt: attempt + 1)
+                        self.attemptRestart(engine: engine, retryDelays: retryDelays, attempt: attempt + 1)
                     }
                 }
             }
@@ -446,7 +441,7 @@ class SharedAudioEngine {
 
         if delay > 0 {
             Logger.debug("[\(SharedAudioEngine.TAG)] Waiting \(Int(delay * 1000))ms before attempt \(attempt + 1)")
-            queue.asyncAfter(deadline: .now() + delay, execute: work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         } else {
             work()
         }
@@ -459,17 +454,15 @@ class SharedAudioEngine {
     ///
     /// If this also fails, declare the engine dead, tear down all state, and
     /// notify delegates so they can report the failure to JS.
-    ///
-    /// Must be called on `queue`.
-    private func _rebuildEngine() {
+    private func rebuildEngine() {
         Logger.debug("[\(SharedAudioEngine.TAG)] rebuildEngine — creating fresh engine (old nodes will NOT be reused)")
         let savedMode = playbackMode
 
         // Full teardown (clears attachedNodes, stops engine, nils it)
-        _teardown()
+        teardown()
 
         do {
-            try _configure(playbackMode: savedMode)
+            try configure(playbackMode: savedMode)
             // Do NOT re-attach old nodes. The VP IO swap can leave old
             // AVAudioPlayerNode instances in a broken state. Delegates must
             // create fresh nodes in their engineDidRebuild() callback.
@@ -478,7 +471,7 @@ class SharedAudioEngine {
         } catch {
             Logger.debug("[\(SharedAudioEngine.TAG)] rebuildEngine FAILED — engine is dead: \(error)")
             // Ensure everything is torn down so a future connect() starts clean
-            _teardown()
+            teardown()
             let reason = "Route change recovery failed after all retries: \(error.localizedDescription)"
             notifyDelegates { $0.engineDidDie(reason: reason) }
         }
@@ -493,12 +486,9 @@ class SharedAudioEngine {
               let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
 
-        queue.async { [weak self] in
-            self?._handleInterruption(type: type)
-        }
-    }
+        lock.lock()
+        defer { lock.unlock() }
 
-    private func _handleInterruption(type: AVAudioSession.InterruptionType) {
         if type == .began {
             Logger.debug("[\(SharedAudioEngine.TAG)] Audio session interruption began")
             notifyDelegates { $0.audioSessionInterruptionBegan() }
@@ -521,6 +511,6 @@ class SharedAudioEngine {
     }
 
     deinit {
-        _teardown()
+        teardown()
     }
 }
