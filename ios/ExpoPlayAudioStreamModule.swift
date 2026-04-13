@@ -158,9 +158,35 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
 
         AsyncFunction("connectPipeline") { (options: [String: Any], promise: Promise) in
             do {
+                // Always ensure the session is set up (no-op if already initialized).
+                // The one-time guard inside ensureAudioSessionInitialized covers
+                // the mic-only path; we re-apply the category below every connect
+                // because audioMode may change between connects.
                 if !self.isAudioSessionInitialized {
                     try self.ensureAudioSessionInitialized()
                 }
+
+                // Parse audioMode (default: "mixWithOthers")
+                let audioModeString = options["audioMode"] as? String ?? "mixWithOthers"
+                var categoryOptions: AVAudioSession.CategoryOptions =
+                    [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+                switch audioModeString {
+                case "mixWithOthers":
+                    categoryOptions.insert(.mixWithOthers)
+                case "duckOthers":
+                    categoryOptions.insert(.duckOthers)
+                case "doNotMix":
+                    break  // no additional option
+                default:
+                    categoryOptions.insert(.mixWithOthers)
+                }
+
+                // Reconfigure the session category with the right mix options.
+                // Runtime category changes are supported on iOS.
+                let audioSession = AVAudioSession.sharedInstance()
+                try audioSession.setCategory(
+                    .playAndRecord, mode: .videoChat, options: categoryOptions)
+                try audioSession.setActive(true)
 
                 // Parse playback mode from options to configure shared engine.
                 // Always use VP — this library is meant for mic+speaker combos.

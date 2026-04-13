@@ -86,6 +86,7 @@ export default function App() {
         targetBufferMs: 80,
         playbackMode: "conversation",
         frequencyBandIntervalMs: 100,
+        audioMode: "mixWithOthers", // try "duckOthers" or "doNotMix" to compare
       });
       console.log("Pipeline connected:", result);
 

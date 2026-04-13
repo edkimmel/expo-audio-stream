@@ -6,6 +6,18 @@ import { PlaybackMode, FrequencyBandConfig, FrequencyBands } from "../types";
 
 // ── Connect ─────────────────────────────────────────────────────────────────
 
+/**
+ * How the pipeline's playback should coexist with other audio on the device.
+ *
+ * - `'mixWithOthers'` (default): plays alongside other apps without
+ *   interrupting them. On Android no audio focus is requested. Best for
+ *   sound effects and short clips.
+ * - `'duckOthers'`: requests audio focus with ducking. Other apps lower
+ *   their volume but keep playing.
+ * - `'doNotMix'`: requests exclusive audio focus. Other apps pause.
+ */
+export type PipelineAudioMode = 'mixWithOthers' | 'duckOthers' | 'doNotMix';
+
 /** Options passed to `connectPipeline()`. */
 export interface ConnectPipelineOptions {
   /** Sample rate in Hz (default 24000). */
@@ -25,6 +37,15 @@ export interface ConnectPipelineOptions {
   frequencyBandIntervalMs?: number;
   /** Optional frequency band crossover configuration. */
   frequencyBandConfig?: FrequencyBandConfig;
+  /**
+   * How pipeline playback should coexist with other apps' audio.
+   * Default is `'mixWithOthers'` (matches expo-audio).
+   *
+   * Note: this is a **behavior change** vs. prior versions of this library,
+   * which effectively used `'doNotMix'`. Pass `'doNotMix'` explicitly to
+   * preserve that old behavior.
+   */
+  audioMode?: PipelineAudioMode;
 }
 
 /** Result returned from a successful `connectPipeline()` call. */

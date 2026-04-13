@@ -59,6 +59,29 @@ interface PipelineListener {
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Controls how pipeline playback coexists with audio from other apps.
+ * Mirrors the `PipelineAudioMode` TS type.
+ */
+enum class AudioMode {
+    /** No focus request — playback mixes freely with other audio. */
+    MIX_WITH_OTHERS,
+
+    /** Request transient focus with ducking — others lower volume but keep playing. */
+    DUCK_OTHERS,
+
+    /** Request exclusive focus — others pause. */
+    DO_NOT_MIX;
+
+    companion object {
+        fun fromString(value: String?): AudioMode = when (value) {
+            "duckOthers" -> DUCK_OTHERS
+            "doNotMix"   -> DO_NOT_MIX
+            else         -> MIX_WITH_OTHERS  // default includes null, "mixWithOthers", and unknown
+        }
+    }
+}
+
+/**
  * Core orchestrator for the native audio pipeline.
  *
  * Creates an [AudioTrack] whose buffer size is derived from the device HAL's
@@ -90,6 +113,7 @@ class AudioPipeline(
     private val frequencyBandIntervalMs: Int = 100,
     private val lowCrossoverHz: Float = 300f,
     private val highCrossoverHz: Float = 2000f,
+    private val audioMode: AudioMode = AudioMode.MIX_WITH_OTHERS,
     private val listener: PipelineListener
 ) {
     companion object {
@@ -550,18 +574,46 @@ class AudioPipeline(
     // ════════════════════════════════════════════════════════════════════
 
     private fun requestAudioFocus() {
-        val result = audioManager.requestAudioFocus(
-            focusChangeListener,
-            AudioManager.STREAM_MUSIC,
-            AudioManager.AUDIOFOCUS_GAIN
-        )
-        hasAudioFocus.set(result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
-        if (!hasAudioFocus.get()) {
-            Log.w(TAG, "Audio focus request denied")
+        when (audioMode) {
+            AudioMode.MIX_WITH_OTHERS -> {
+                // No focus request — we coexist silently with other apps.
+                // Mark as "has focus" so the write loop proceeds unconditionally.
+                hasAudioFocus.set(true)
+                audioFocusLost.set(false)
+                Log.d(TAG, "Audio focus skipped (mixWithOthers)")
+            }
+            AudioMode.DUCK_OTHERS -> {
+                val result = audioManager.requestAudioFocus(
+                    focusChangeListener,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+                )
+                hasAudioFocus.set(result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+                if (!hasAudioFocus.get()) {
+                    Log.w(TAG, "Audio focus request (duckOthers) denied")
+                }
+            }
+            AudioMode.DO_NOT_MIX -> {
+                val result = audioManager.requestAudioFocus(
+                    focusChangeListener,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN
+                )
+                hasAudioFocus.set(result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+                if (!hasAudioFocus.get()) {
+                    Log.w(TAG, "Audio focus request (doNotMix) denied")
+                }
+            }
         }
     }
 
     private fun abandonAudioFocus() {
+        if (audioMode == AudioMode.MIX_WITH_OTHERS) {
+            // No focus was ever requested — nothing to abandon.
+            hasAudioFocus.set(false)
+            audioFocusLost.set(false)
+            return
+        }
         audioManager.abandonAudioFocus(focusChangeListener)
         hasAudioFocus.set(false)
         audioFocusLost.set(false)

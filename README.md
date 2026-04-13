@@ -79,6 +79,7 @@ const result = await Pipeline.connect({
   channelCount: 1,
   targetBufferMs: 80,
   frequencyBandIntervalMs: 100, // optional: emit frequency bands every 100ms
+  audioMode: "mixWithOthers",   // coexist with other apps (default)
 });
 
 // Subscribe to events
@@ -226,10 +227,22 @@ interface ConnectPipelineOptions {
   sampleRate?: number;              // default 24000
   channelCount?: number;            // default 1 (mono)
   targetBufferMs?: number;          // ms to buffer before priming gate opens (default 80)
+  playbackMode?: "voiceProcessing" | "conversation";
   frequencyBandIntervalMs?: number; // emit PipelineFrequencyBands every N ms (omit to disable)
   frequencyBandConfig?: FrequencyBandConfig; // crossover frequencies (optional)
+  audioMode?: "mixWithOthers" | "duckOthers" | "doNotMix"; // default "mixWithOthers"
 }
 ```
+
+#### `audioMode`
+
+Controls how pipeline playback coexists with audio from other apps on the device. Default: `"mixWithOthers"` (matches expo-audio).
+
+- **`"mixWithOthers"`** — plays alongside other apps without interrupting them. On Android no audio focus is requested; on iOS the session uses the `.mixWithOthers` category option. Best for sound effects and short clips.
+- **`"duckOthers"`** — requests audio focus with ducking. Other apps lower their volume but keep playing.
+- **`"doNotMix"`** — requests exclusive audio focus. Other apps pause.
+
+> **Breaking change:** The default was effectively `"doNotMix"` in prior versions. If you rely on the previous behavior — where connecting the pipeline pauses other apps' audio — pass `audioMode: "doNotMix"` explicitly when calling `Pipeline.connect`.
 
 ### PushPipelineAudioOptions
 

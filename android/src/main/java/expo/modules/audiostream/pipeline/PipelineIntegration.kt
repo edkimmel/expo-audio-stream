@@ -121,6 +121,7 @@ class PipelineIntegration(
             val bandConfig = options["frequencyBandConfig"] as? Map<*, *>
             val lowCrossoverHz = (bandConfig?.get("lowCrossoverHz") as? Number)?.toFloat() ?: 300f
             val highCrossoverHz = (bandConfig?.get("highCrossoverHz") as? Number)?.toFloat() ?: 2000f
+            val audioMode = AudioMode.fromString(options["audioMode"] as? String)
 
             pipeline = AudioPipeline(
                 context = context,
@@ -130,6 +131,7 @@ class PipelineIntegration(
                 frequencyBandIntervalMs = frequencyBandIntervalMs,
                 lowCrossoverHz = lowCrossoverHz,
                 highCrossoverHz = highCrossoverHz,
+                audioMode = audioMode,
                 listener = this
             )
             pipeline!!.connect()
