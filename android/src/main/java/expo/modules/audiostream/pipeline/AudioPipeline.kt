@@ -309,8 +309,8 @@ class AudioPipeline(
         } catch (e: Exception) {
             Log.e(TAG, "connect() failed", e)
             setState(PipelineState.ERROR)
-            listener.onError("CONNECT_FAILED", e.message ?: "Unknown error")
             disconnect()
+            throw e
         }
     }
 

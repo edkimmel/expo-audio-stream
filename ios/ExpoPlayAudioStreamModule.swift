@@ -209,6 +209,15 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
 
                 promise.resolve(result)
             } catch {
+                // Reset session + engine state so a subsequent connect can recover.
+                // Without this, a partial failure (e.g. setActive denial after the
+                // iOS local-network permission prompt) leaves the session stuck and
+                // every retry fails the same way.
+                self._pipelineIntegration?.removeAsDelegate(from: self.sharedAudioEngine)
+                self._pipelineIntegration?.disconnect()
+                self.sharedAudioEngine.teardown()
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                self.isAudioSessionInitialized = false
                 promise.reject("PIPELINE_CONNECT_ERROR", error.localizedDescription)
             }
         }

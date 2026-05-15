@@ -129,8 +129,17 @@ export interface RecordingConfig {
   enableProcessing?: boolean; // Boolean to enable/disable audio processing (default is false)
   pointsPerSecond?: number; // Number of data points to extract per second of audio (default is 1000)
   onAudioStream?: (event: AudioDataEvent) => Promise<void>; // Callback function to handle audio stream
+  /** Fired when the native layer reports a mid-recording error (e.g. system
+   * interruption like Siri or a phone call). The consumer should treat the
+   * recording session as terminated and clean up. */
+  onError?: (event: MicrophoneErrorEvent) => void;
   /** Optional frequency band crossover configuration. */
   frequencyBandConfig?: FrequencyBandConfig;
+}
+
+export interface MicrophoneErrorEvent {
+  code: string;
+  message: string;
 }
 
 export interface Chunk {

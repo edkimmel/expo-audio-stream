@@ -21,6 +21,10 @@ export interface AudioEventPayload {
   streamUuid: string;
   soundLevel?: number;
   frequencyBands?: { low: number; mid: number; high: number };
+  /** Set by native when a mid-recording error occurs (interruption, read failure).
+   * When present, `encoded` is absent and the recording is no longer active. */
+  error?: string;
+  errorMessage?: string;
 }
 
 export const DeviceReconnectedReasons = {

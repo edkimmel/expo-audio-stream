@@ -6,6 +6,10 @@ import {
 } from '@expo/config-plugins'
 
 const MICROPHONE_USAGE = 'Allow $(PRODUCT_NAME) to access your microphone'
+// AVFoundation enumerates AirPlay/Continuity audio devices on the local network
+// even though we don't use them — without this description, iOS shows a generic
+// prompt and a denial leaves the audio session unable to activate.
+const LOCAL_NETWORK_USAGE = 'Allow $(PRODUCT_NAME) to discover audio devices on your local network'
 
 const withRecordingPermission: ConfigPlugin<{
     microphonePermission: string
@@ -15,6 +19,7 @@ const withRecordingPermission: ConfigPlugin<{
     }
     config = withInfoPlist(config, (config) => {
         config.modResults['NSMicrophoneUsageDescription'] = config.modResults['NSMicrophoneUsageDescription'] || MICROPHONE_USAGE
+        config.modResults['NSLocalNetworkUsageDescription'] = config.modResults['NSLocalNetworkUsageDescription'] || LOCAL_NETWORK_USAGE
 
         // Add audio to UIBackgroundModes to allow background audio recording
         const existingBackgroundModes =

@@ -72,7 +72,7 @@ class PipelineIntegration: PipelineListener {
             sharedEngine: sharedEngine,
             listener: self
         )
-        p.connect()
+        try p.connect()
         pipeline = p
 
         return [

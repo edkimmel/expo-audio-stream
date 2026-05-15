@@ -59,9 +59,12 @@ export class ExpoPlayAudioStream {
   }> {
     let subscription: Subscription | undefined;
     try {
-      const { onAudioStream, ...options } = recordingConfig;
+      const { onAudioStream, onError, ...options } = recordingConfig;
 
-      if (onAudioStream && typeof onAudioStream == "function") {
+      if (
+        (onAudioStream && typeof onAudioStream == "function") ||
+        (onError && typeof onError == "function")
+      ) {
         subscription = addAudioEventListener(
           async (event: AudioEventPayload) => {
             const {
@@ -72,7 +75,13 @@ export class ExpoPlayAudioStream {
               encoded,
               soundLevel,
               frequencyBands,
+              error,
+              errorMessage,
             } = event;
+            if (error) {
+              onError?.({ code: error, message: errorMessage ?? "" });
+              return;
+            }
             if (!encoded) {
               console.error(
                 `[ExpoPlayAudioStream] Encoded audio data is missing`

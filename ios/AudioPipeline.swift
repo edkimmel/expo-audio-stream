@@ -122,7 +122,7 @@ class AudioPipeline: SharedAudioEngineDelegate {
     // Connect / Disconnect
     // ════════════════════════════════════════════════════════════════════
 
-    func connect() {
+    func connect() throws {
         guard !running else {
             Logger.debug("[\(AudioPipeline.TAG)] connect() called while already running — ignoring")
             return
@@ -197,8 +197,8 @@ class AudioPipeline: SharedAudioEngineDelegate {
         } catch {
             Logger.debug("[\(AudioPipeline.TAG)] connect() failed: \(error)")
             setState(.error)
-            listener?.onError(code: "CONNECT_FAILED", message: error.localizedDescription)
             disconnect()
+            throw error
         }
     }
 

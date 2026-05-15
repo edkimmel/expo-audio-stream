@@ -28,6 +28,14 @@ class Microphone {
     private var isSilent: Bool = false
     private var frequencyBandAnalyzer: FrequencyBandAnalyzer?
     private var frequencyBandConfig: (lowCrossoverHz: Float, highCrossoverHz: Float)?
+
+    /// Interval (in ms) the consumer last requested. Used to rebuild the tap
+    /// with the same cadence when resuming after an interruption.
+    private var lastIntervalMs: Int = 100
+    /// Set when an audio session interruption begins while recording is active.
+    /// Cleared either by `stopRecording` (consumer chose disconnect) or by the
+    /// `.ended` handler after a successful auto-resume.
+    private var pendingInterruptionResume: Bool = false
     
     init() {
         NotificationCenter.default.addObserver(
@@ -36,8 +44,18 @@ class Microphone {
             name: AVAudioSession.routeChangeNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleInterruption),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
     }
-    
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
     /// Handles audio route changes (e.g. headphones connected/disconnected)
     /// - Parameter notification: The notification object containing route change information
     @objc private func handleRouteChange(notification: Notification) {
@@ -46,7 +64,7 @@ class Microphone {
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
             return
         }
-        
+
         Logger.debug("[Microphone] Route is changed \(reason)")
 
         switch reason {
@@ -55,7 +73,7 @@ class Microphone {
                 stopRecording(resolver: nil)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     guard let self = self, let settings = self.recordingSettings else { return }
-                    
+
                     _ = startRecording(settings: self.recordingSettings!, intervalMilliseconds: 100, frequencyBandConfig: self.frequencyBandConfig)
                 }
             }
@@ -64,6 +82,96 @@ class Microphone {
         default:
             break
         }
+    }
+
+    /// Handles audio session interruptions (e.g. Siri, phone call, alarm).
+    ///
+    /// On `.began` we stop the engine (iOS deactivates the session regardless)
+    /// but keep `isRecording = true` and emit an `INTERRUPTED` error so the
+    /// consumer can decide:
+    ///   - Call `stopRecording` to disconnect explicitly (clears the resume flag).
+    ///   - Do nothing to let the library auto-resume when the system gives the
+    ///     mic back on `.ended`.
+    @objc private func handleInterruption(notification: Notification) {
+        guard let info = notification.userInfo,
+              let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+            return
+        }
+
+        switch type {
+        case .began:
+            Logger.debug("[Microphone] Audio session interruption began")
+            guard isRecording else { return }
+            // Tear down the engine but leave isRecording true so the consumer's
+            // intent is preserved. The .ended branch will decide whether to
+            // resume based on whether stopRecording was called in between.
+            pendingInterruptionResume = true
+            if let engine = audioEngine {
+                engine.inputNode.removeTap(onBus: 0)
+                engine.stop()
+            }
+            delegate?.onMicrophoneError("INTERRUPTED", "Audio session interrupted by system")
+        case .ended:
+            Logger.debug("[Microphone] Audio session interruption ended")
+            guard pendingInterruptionResume else { return }
+            pendingInterruptionResume = false
+            // iOS uses AVAudioSessionInterruptionOptionKey.shouldResume to hint
+            // whether the app can safely reactivate. Absent means another app
+            // took over (e.g. an ongoing call) — in that case we surface a
+            // terminal error instead of attempting a doomed restart.
+            let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+            guard options.contains(.shouldResume) else {
+                Logger.debug("[Microphone] System did not signal shouldResume — treating as terminal stop")
+                isRecording = false
+                delegate?.onMicrophoneError(
+                    "RESUME_DENIED",
+                    "System did not permit microphone resume after interruption"
+                )
+                return
+            }
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+                try installTapAndStartEngine(intervalMilliseconds: lastIntervalMs)
+                Logger.debug("[Microphone] Auto-resumed after interruption")
+            } catch {
+                Logger.debug("[Microphone] Auto-resume failed: \(error.localizedDescription)")
+                // Engine couldn't restart — surface as terminal stop.
+                isRecording = false
+                delegate?.onMicrophoneError(
+                    "RESUME_FAILED",
+                    "Could not restart microphone after interruption: \(error.localizedDescription)"
+                )
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    /// Installs the audio tap on the input node and starts the engine.
+    /// Shared between fresh `startRecording` and post-interruption resume.
+    private func installTapAndStartEngine(intervalMilliseconds: Int) throws {
+        let hardwareFormat = audioEngine.inputNode.inputFormat(forBus: 0)
+        let intervalSamples = AVAudioFrameCount(
+            Double(intervalMilliseconds) / 1000.0 * hardwareFormat.sampleRate
+        )
+        let tapBufferSize = max(intervalSamples, 256)
+
+        audioEngine.inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: nil) { [weak self] (buffer, time) in
+            guard let self = self else { return }
+
+            guard buffer.frameLength > 0 else {
+                Logger.debug("Error: received empty buffer in tap callback")
+                self.delegate?.onMicrophoneError("READ_ERROR", "Received empty audio buffer")
+                return
+            }
+
+            self.processAudioBuffer(buffer)
+            self.lastBufferTime = time
+        }
+
+        try audioEngine.start()
     }
     
     func toggleSilence(isSilent: Bool) {
@@ -101,6 +209,7 @@ class Microphone {
         recordingSettings = newSettings  // Update the class property with the new settings
 
         self.frequencyBandConfig = frequencyBandConfig
+        self.lastIntervalMs = intervalMilliseconds
         // Analyzer uses the desired (target) sample rate, not hardware rate
         let targetRate = Int(settings.desiredSampleRate ?? settings.sampleRate)
         let fbConfig = frequencyBandConfig ?? (lowCrossoverHz: Float(300), highCrossoverHz: Float(2000))
@@ -110,30 +219,9 @@ class Microphone {
             highCrossoverHz: fbConfig.highCrossoverHz
         )
 
-        // Compute tap buffer size from interval so Core Audio delivers at the right cadence
-        let intervalSamples = AVAudioFrameCount(
-            Double(intervalMilliseconds) / 1000.0 * hardwareFormat.sampleRate
-        )
-        let tapBufferSize = max(intervalSamples, 256) // floor at 256 frames (~5ms at 48kHz)
-
-        // Pass nil for format to use the hardware's native format, avoiding format mismatch crashes.
-        // Core Audio does not support format conversion (e.g. Float32 -> Int16) on the tap itself.
-        audioEngine.inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: nil) { [weak self] (buffer, time) in
-            guard let self = self else { return }
-
-            guard buffer.frameLength > 0 else {
-                Logger.debug("Error: received empty buffer in tap callback")
-                self.delegate?.onMicrophoneError("READ_ERROR", "Received empty audio buffer")
-                return
-            }
-
-            self.processAudioBuffer(buffer)
-            self.lastBufferTime = time
-        }
-        
         do {
             startTime = Date()
-            try audioEngine.start()
+            try installTapAndStartEngine(intervalMilliseconds: intervalMilliseconds)
             isRecording = true
             Logger.debug("Debug: Recording started successfully.")
             return StartRecordingResult(
@@ -151,6 +239,9 @@ class Microphone {
     }
     
     public func stopRecording(resolver promise: Promise?) {
+        // Clear resume intent up-front so a stopRecording call during an
+        // active interruption window cancels the auto-resume on .ended.
+        pendingInterruptionResume = false
         guard self.isRecording else {
             if let promiseResolver = promise {
                 promiseResolver.resolve(nil)
