@@ -45,7 +45,7 @@ class FrequencyBandAnalyzer {
         defer { lock.unlock() }
 
         for i in 0..<sampleCount {
-            let s = Float(samples[i]) / 32768.0
+            let s = PCMConversion.int16ToFloat(samples[i])
 
             lp1 += alphaLow * (s - lp1)
             lp2 += alphaHigh * (s - lp2)

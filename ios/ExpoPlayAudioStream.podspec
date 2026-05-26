@@ -24,4 +24,7 @@ Pod::Spec.new do |s|
   }
 
   s.source_files = "**/*.{h,m,swift}"
+  # ios/Tests holds XCTest sources run via Swift Package Manager (see Package.swift
+  # at the repo root), not via CocoaPods — exclude them from the production pod.
+  s.exclude_files = "Tests/**/*"
 end

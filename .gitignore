@@ -60,6 +60,11 @@ yarn-error.log
 example/ios/*
 example/android/*
 
+# Swift Package Manager (used for iOS pure-Swift unit tests)
+.build/
+# pod gen output
+/gen/
+
 # AI
 .cursor/
 .claude/
