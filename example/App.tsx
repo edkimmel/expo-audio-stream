@@ -64,8 +64,6 @@ export default function App() {
   };
 
   const onAudioCallback = async (audio: AudioDataEvent) => {
-    const nowMilliseconds = Date.now() % 1000;
-    console.log(`Mic data ${nowMilliseconds}:`, audio.data.slice(0, 100));
     if (audio.frequencyBands) {
       setMicBands(audio.frequencyBands);
     }

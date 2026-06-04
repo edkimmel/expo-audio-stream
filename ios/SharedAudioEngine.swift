@@ -21,10 +21,18 @@ protocol SharedAudioEngineDelegate: AnyObject {
     /// Consumer should restart playback.
     func audioSessionInterruptionEnded()
 
+    /// Audio session interruption ended but the system did not signal shouldResume.
+    /// Recording has been stopped. Consumer should clean up and wait for the user to reconnect.
+    func audioSessionResumeDenied()
+
     /// Engine failed to restart after exhausting all retry attempts.
     /// All state has been torn down. Consumer should report the failure
     /// to JS and clean up its own state so a fresh connect can succeed.
     func engineDidDie(reason: String)
+}
+
+extension SharedAudioEngineDelegate {
+    func audioSessionResumeDenied() {}
 }
 
 /// Owns the single AVAudioEngine shared between AudioPipeline consumers.
@@ -494,6 +502,16 @@ class SharedAudioEngine {
             notifyDelegates { $0.audioSessionInterruptionBegan() }
         } else if type == .ended {
             Logger.debug("[\(SharedAudioEngine.TAG)] Audio session interruption ended")
+            let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+            guard options.contains(.shouldResume) else {
+                // shouldResume absent — system hints we should not restart yet.
+                // Note: this flag is advisory; may be worth revisiting if it causes
+                // false negatives in practice.
+                Logger.debug("[\(SharedAudioEngine.TAG)] shouldResume not set — skipping restart")
+                notifyDelegates { $0.audioSessionResumeDenied() }
+                return
+            }
             // Reactivate session and restart engine
             try? AVAudioSession.sharedInstance().setActive(true)
             if let engine = engine, !engine.isRunning {

@@ -37,10 +37,7 @@ class Microphone: SharedAudioEngineDelegate {
             try installTap(intervalMilliseconds: lastIntervalMs)
         } catch {
             Logger.debug("[Microphone] Failed to reinstall tap after route change: \(error)")
-            isRecording = false
-            sharedAudioEngine?.removeDelegate(self)
-            frequencyBandAnalyzer = nil
-            delegate?.onMicrophoneError(MicrophoneErrorInfo(
+            failRecording(MicrophoneErrorInfo(
                 code: "RESTART_FAILED",
                 message: "Could not reinstall microphone tap after route change: \(error.localizedDescription)",
                 isFatal: true,
@@ -56,16 +53,23 @@ class Microphone: SharedAudioEngineDelegate {
             try installTap(intervalMilliseconds: lastIntervalMs)
         } catch {
             Logger.debug("[Microphone] Failed to reinstall tap after engine rebuild: \(error)")
-            isRecording = false
-            sharedAudioEngine?.removeDelegate(self)
-            frequencyBandAnalyzer = nil
-            delegate?.onMicrophoneError(MicrophoneErrorInfo(
+            failRecording(MicrophoneErrorInfo(
                 code: "RESTART_FAILED",
                 message: "Could not reinstall microphone tap after engine rebuild: \(error.localizedDescription)",
                 isFatal: true,
                 autoResuming: false
             ))
         }
+    }
+
+    func audioSessionResumeDenied() {
+        guard isRecording else { return }
+        failRecording(MicrophoneErrorInfo(
+            code: "RESUME_DENIED",
+            message: "System did not permit microphone resume after interruption",
+            isFatal: true,
+            autoResuming: false
+        ))
     }
 
     func audioSessionInterruptionBegan() {
@@ -86,10 +90,7 @@ class Microphone: SharedAudioEngineDelegate {
             try installTap(intervalMilliseconds: lastIntervalMs)
         } catch {
             Logger.debug("[Microphone] Failed to reinstall tap after interruption resume: \(error)")
-            isRecording = false
-            sharedAudioEngine?.removeDelegate(self)
-            frequencyBandAnalyzer = nil
-            delegate?.onMicrophoneError(MicrophoneErrorInfo(
+            failRecording(MicrophoneErrorInfo(
                 code: "RESUME_FAILED",
                 message: "Could not reinstall microphone tap after interruption: \(error.localizedDescription)",
                 isFatal: true,
@@ -100,10 +101,7 @@ class Microphone: SharedAudioEngineDelegate {
 
     func engineDidDie(reason: String) {
         guard isRecording else { return }
-        isRecording = false
-        sharedAudioEngine?.removeDelegate(self)
-        frequencyBandAnalyzer = nil
-        delegate?.onMicrophoneError(MicrophoneErrorInfo(
+        failRecording(MicrophoneErrorInfo(
             code: "ENGINE_DIED",
             message: reason,
             isFatal: true,
@@ -124,7 +122,7 @@ class Microphone: SharedAudioEngineDelegate {
             Logger.debug("[Microphone] Recording is already in progress.")
             return StartRecordingResult(error: "Recording is already in progress.")
         }
-        guard let shared = sharedAudioEngine, shared.isConfigured, shared.engine != nil else {
+        guard let shared = sharedAudioEngine, shared.isConfigured, let engine = shared.engine else {
             Logger.debug("[Microphone] Shared audio engine is not configured.")
             return StartRecordingResult(error: "Shared audio engine is not configured.")
         }
@@ -132,7 +130,7 @@ class Microphone: SharedAudioEngineDelegate {
         var newSettings = settings
         totalDataSize = 0
 
-        let hardwareFormat = shared.engine!.inputNode.inputFormat(forBus: 0)
+        let hardwareFormat = engine.inputNode.inputFormat(forBus: 0)
         newSettings.sampleRate = hardwareFormat.sampleRate
         Logger.debug("[Microphone] Hardware sample rate: \(hardwareFormat.sampleRate) Hz, desired: \(settings.sampleRate) Hz")
 
@@ -148,10 +146,10 @@ class Microphone: SharedAudioEngineDelegate {
             highCrossoverHz: fbConfig.highCrossoverHz
         )
 
+        sharedAudioEngine?.addDelegate(self)
         do {
             startTime = Date()
             try installTap(intervalMilliseconds: intervalMilliseconds)
-            sharedAudioEngine?.addDelegate(self)
             isRecording = true
             Logger.debug("[Microphone] Recording started successfully.")
             return StartRecordingResult(
@@ -163,6 +161,7 @@ class Microphone: SharedAudioEngineDelegate {
             )
         } catch {
             Logger.debug("[Microphone] Could not start recording: \(error.localizedDescription)")
+            sharedAudioEngine?.removeDelegate(self)
             isRecording = false
             return StartRecordingResult(error: "Could not start recording: \(error.localizedDescription)")
         }
@@ -183,6 +182,15 @@ class Microphone: SharedAudioEngineDelegate {
     }
 
     // ── Private helpers ──────────────────────────────────────────────────
+
+    private func failRecording(_ error: MicrophoneErrorInfo) {
+        isRecording = false
+        pendingInterruptionResume = false
+        sharedAudioEngine?.engine?.inputNode.removeTap(onBus: 0)
+        sharedAudioEngine?.removeDelegate(self)
+        frequencyBandAnalyzer = nil
+        delegate?.onMicrophoneError(error)
+    }
 
     private func installTap(intervalMilliseconds: Int) throws {
         guard let inputNode = sharedAudioEngine?.engine?.inputNode else {
