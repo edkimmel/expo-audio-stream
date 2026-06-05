@@ -9,18 +9,13 @@ import android.util.Log
 /**
  * Manages hardware audio effects for voice recording.
  *
- * We use VOICE_RECOGNITION as our audio source. The Android CDD (Section 5.4)
- * mandates that this source delivers unprocessed audio:
- *   [C-1-2] MUST disable noise reduction by default
- *   [C-1-3] MUST disable automatic gain control by default
+ * We use VOICE_COMMUNICATION as our audio source. This source enables
+ * platform-managed AEC at the HAL level automatically. The explicit
+ * AcousticEchoCanceler effect here is belt-and-suspenders for devices
+ * where the platform does not apply it automatically.
  *
- * NS and AGC are therefore off by default to honor the spec. Enabling them
- * re-introduces the processing the CDD explicitly prohibits for this source
- * and can cause low-volume capture on many OEMs.
- *
- * AEC is the one effect the CDD permits for VOICE_RECOGNITION ("expects a
- * stream that has an echo cancellation effect if available"), so it is
- * enabled by default.
+ * NS and AGC remain opt-in — VOICE_COMMUNICATION applies its own
+ * processing and additional effects can cause over-processing on some OEMs.
  */
 class AudioEffectsManager(
     /** Enable hardware noise suppressor. Default false — CDD 5.4 [C-1-2] prohibits it for VOICE_RECOGNITION. */

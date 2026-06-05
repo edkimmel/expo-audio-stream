@@ -26,6 +26,7 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
     private lateinit var audioRecorderManager: AudioRecorderManager
     private lateinit var audioManager: AudioManager
     private lateinit var pipelineIntegration: PipelineIntegration
+    private lateinit var communicationAudioManager: CommunicationAudioManager
 
     // Ensure callbacks are delivered on the main thread
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
@@ -62,6 +63,7 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             if (firstOfGroup?.isNotEmpty()==true) {
                 val matched = firstOfGroup.map { "${it.productName} (type=${it.type})" }
                 Log.d("ExpoAudioCallback", "AudioDeviceCallback ➜ ADDED (interesting): $matched")
+                communicationAudioManager.onDeviceChanged()
                 pipelineIntegration.logAudioTrackHealth("device_added")
                 val params = Bundle()
                 params.putString("reason", "newDeviceAvailable")
@@ -79,6 +81,7 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             if (lastOfGroup?.isNotEmpty() == true) {
                 val matched = lastOfGroup.map { "${it.productName} (type=${it.type})" }
                 Log.d("ExpoAudioCallback", "AudioDeviceCallback ➜ REMOVED (interesting): $matched")
+                communicationAudioManager.onDeviceChanged()
                 pipelineIntegration.logAudioTrackHealth("device_removed")
                 val params = Bundle()
                 params.putString("reason", "oldDeviceUnavailable")
@@ -114,26 +117,27 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
 
         OnCreate {
             audioManager = appContext.reactContext?.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            communicationAudioManager = CommunicationAudioManager(audioManager)
             audioManager.registerAudioDeviceCallback(audioCallCallback, mainHandler)
         }
 
         OnDestroy {
             reportedGroups.clear()
             audioManager.unregisterAudioDeviceCallback(audioCallCallback)
-            // Module is being destroyed (app shutdown)
-            // Just clean up resources without reinitialization
             pipelineIntegration.destroy()
             audioRecorderManager.release()
+            communicationAudioManager.forceReset(appContext.currentActivity)
         }
 
         AsyncFunction("destroy") { promise: Promise ->
-            // User explicitly called destroy - clean up and reinitialize for reuse
             pipelineIntegration.destroy()
             audioRecorderManager.release()
+            communicationAudioManager.forceReset(appContext.currentActivity)
 
             // Reinitialize all managers so the module can be used again
             initializeManager()
             initializePipeline()
+            communicationAudioManager = CommunicationAudioManager(audioManager)
             promise.resolve(null)
         }
 
@@ -154,11 +158,13 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         }
 
         AsyncFunction("startMicrophone") { options: Map<String, Any?>, promise: Promise ->
+            communicationAudioManager.startSession(appContext.currentActivity)
             audioRecorderManager.startRecording(options, promise)
         }
 
         AsyncFunction("stopMicrophone") { promise: Promise ->
             audioRecorderManager.stopRecording(promise)
+            communicationAudioManager.stopSession(appContext.currentActivity)
         }
 
         Function("toggleSilence") { isSilent: Boolean ->
@@ -169,6 +175,7 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         // ── Native Audio Pipeline V3 ────────────────────────────────────
 
         AsyncFunction("connectPipeline") { options: Map<String, Any?>, promise: Promise ->
+            communicationAudioManager.startSession(appContext.currentActivity)
             pipelineIntegration.connect(options, promise)
         }
 
@@ -182,6 +189,7 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
 
         AsyncFunction("disconnectPipeline") { promise: Promise ->
             pipelineIntegration.disconnect(promise)
+            communicationAudioManager.stopSession(appContext.currentActivity)
         }
 
         AsyncFunction("invalidatePipelineTurn") { options: Map<String, Any?>, promise: Promise ->

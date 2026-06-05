@@ -90,8 +90,9 @@ enum class AudioMode {
  * **MAX_PRIORITY write thread** that loops `buffer.read() → track.write(BLOCKING)`.
  *
  * Key design points:
- *   - AudioTrack uses **USAGE_MEDIA + CONTENT_TYPE_SPEECH** (not
- *     VOICE_COMMUNICATION — avoids earpiece routing).
+ *   - AudioTrack uses **USAGE_VOICE_COMMUNICATION + CONTENT_TYPE_SPEECH** so its
+ *     output feeds the hardware AEC echo reference path. Earpiece routing is
+ *     prevented by CommunicationAudioManager (setCommunicationDevice/isSpeakerphoneOn).
  *   - AudioTrack stays alive for the entire session, writing silence when idle.
  *     This avoids 50–100 ms restart latency.
  *   - Config is **immutable per session** — tear down and rebuild to change
@@ -129,7 +130,9 @@ class AudioPipeline(
         /** If playback head hasn't moved for this long, declare zombie. */
         private const val ZOMBIE_STALL_THRESHOLD_MS = 5000L
 
-        /** Minimum volume level (0–15) enforced by VolumeGuard on STREAM_MUSIC. */
+        /** Minimum volume level (0–15) enforced by VolumeGuard on STREAM_VOICE_CALL.
+         *  USAGE_VOICE_COMMUNICATION is required so the output feeds the hardware AEC
+         *  echo reference path — USAGE_MEDIA does not. */
         private const val MIN_VOLUME_LEVEL = 1
     }
 
@@ -263,7 +266,7 @@ class AudioPipeline(
 
             // ── 2. AudioTrack ───────────────────────────────────────────
             val audioAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
 
@@ -637,7 +640,7 @@ class AudioPipeline(
             AudioMode.DUCK_OTHERS -> {
                 val result = audioManager.requestAudioFocus(
                     focusChangeListener,
-                    AudioManager.STREAM_MUSIC,
+                    AudioManager.STREAM_VOICE_CALL,
                     AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
                 )
                 hasAudioFocus.set(result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
@@ -648,7 +651,7 @@ class AudioPipeline(
             AudioMode.DO_NOT_MIX -> {
                 val result = audioManager.requestAudioFocus(
                     focusChangeListener,
-                    AudioManager.STREAM_MUSIC,
+                    AudioManager.STREAM_VOICE_CALL,
                     AudioManager.AUDIOFOCUS_GAIN
                 )
                 hasAudioFocus.set(result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
@@ -743,12 +746,12 @@ class AudioPipeline(
     private fun installVolumeGuard() {
         volumeObserver = object : ContentObserver(mainHandler) {
             override fun onChange(selfChange: Boolean) {
-                val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                val current = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
                 if (current < MIN_VOLUME_LEVEL) {
-                    Log.d(TAG, "VolumeGuard: raising STREAM_MUSIC from $current to $MIN_VOLUME_LEVEL")
+                    Log.d(TAG, "VolumeGuard: raising STREAM_VOICE_CALL from $current to $MIN_VOLUME_LEVEL")
                     try {
                         audioManager.setStreamVolume(
-                            AudioManager.STREAM_MUSIC,
+                            AudioManager.STREAM_VOICE_CALL,
                             MIN_VOLUME_LEVEL,
                             0 // no flags — silent raise
                         )

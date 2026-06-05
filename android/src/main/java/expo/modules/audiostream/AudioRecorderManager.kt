@@ -494,9 +494,11 @@ class AudioRecorderManager(
             return null
         }
 
-        // Use VOICE_RECOGNITION for far-field/speakerphone use — higher mic gain,
-        // no near-field gain reduction. AEC/NS/AGC are applied separately via AudioEffectsManager.
-        val audioSource = MediaRecorder.AudioSource.VOICE_RECOGNITION
+        // VOICE_COMMUNICATION enables platform-managed AEC (echo cancellation happens at
+        // the HAL level, not just via the explicit AcousticEchoCanceler effect).
+        // VOICE_RECOGNITION intentionally bypasses platform AEC per the Android CDD,
+        // making hardware echo cancellation ineffective regardless of AudioEffectsManager.
+        val audioSource = MediaRecorder.AudioSource.VOICE_COMMUNICATION
 
         val record = AudioRecord(
             audioSource,
