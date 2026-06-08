@@ -1,7 +1,9 @@
 package expo.modules.audiostream
 
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
@@ -17,7 +19,8 @@ class AudioRecorderManager(
     private val permissionUtils: PermissionUtils,
     private val audioDataEncoder: AudioDataEncoder,
     private val eventSender: EventSender,
-    private val audioEffectsManager: AudioEffectsManager
+    private val audioEffectsManager: AudioEffectsManager,
+    private val audioManager: AudioManager
 ) {
     private var audioRecord: AudioRecord? = null
     private var bufferSizeInBytes = 0   // AudioRecord internal ring buffer (>= getMinBufferSize)
@@ -31,8 +34,18 @@ class AudioRecorderManager(
     private var totalDataSize = 0
     private var pausedDuration = 0L
     private var lastEmittedSize = 0L
+    private var recordingSessionId: Int? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val audioRecordLock = Any()
+    private val recordingCallbackRegistered = AtomicBoolean(false)
+    private val recordingInterruptionHandled = AtomicBoolean(false)
+    private val recordingConfigObserved = AtomicBoolean(false)
+
+    private val recordingCallback = object : AudioManager.AudioRecordingCallback() {
+        override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
+            handleRecordingConfigChanged(configs)
+        }
+    }
 
     // Flag to control whether actual audio data or silence is sent
     private var isSilent = false
@@ -155,11 +168,12 @@ class AudioRecorderManager(
         streamUuid = java.util.UUID.randomUUID().toString()
 
         audioRecord?.startRecording()
-        // Apply audio effects after starting recording using the manager
-        audioRecord?.let { audioEffectsManager.setupAudioEffects(it) }
-
         isPaused.set(false)
         isRecording.set(true)
+
+        audioRecord?.let { registerRecordingCallback(it) }
+        // Apply audio effects after starting recording using the manager
+        audioRecord?.let { audioEffectsManager.setupAudioEffects(it) }
 
         if (!isPaused.get()) {
             recordingStartTime =
@@ -196,6 +210,8 @@ class AudioRecorderManager(
      */
     private fun cleanupResources() {
         try {
+            unregisterRecordingCallback()
+
             // Release audio effects
             audioEffectsManager.releaseAudioEffects()
 
@@ -234,6 +250,71 @@ class AudioRecorderManager(
             Log.d(Constants.TAG, "Audio resources cleaned up")
         } catch (e: Exception) {
             Log.e(Constants.TAG, "Error during resource cleanup", e)
+        }
+    }
+
+    private fun registerRecordingCallback(record: AudioRecord) {
+        recordingSessionId = record.audioSessionId
+        recordingInterruptionHandled.set(false)
+        recordingConfigObserved.set(false)
+        if (recordingCallbackRegistered.getAndSet(true)) return
+
+        try {
+            audioManager.registerAudioRecordingCallback(recordingCallback, mainHandler)
+            Log.d(Constants.TAG, "AudioRecordingCallback registered for session ${record.audioSessionId}")
+        } catch (e: Exception) {
+            recordingCallbackRegistered.set(false)
+            Log.e(Constants.TAG, "Failed to register AudioRecordingCallback", e)
+        }
+    }
+
+    private fun unregisterRecordingCallback() {
+        recordingSessionId = null
+        recordingInterruptionHandled.set(false)
+        recordingConfigObserved.set(false)
+        if (!recordingCallbackRegistered.getAndSet(false)) return
+
+        try {
+            audioManager.unregisterAudioRecordingCallback(recordingCallback)
+            Log.d(Constants.TAG, "AudioRecordingCallback unregistered")
+        } catch (e: Exception) {
+            Log.e(Constants.TAG, "Failed to unregister AudioRecordingCallback", e)
+        }
+    }
+
+    private fun handleRecordingConfigChanged(configs: List<AudioRecordingConfiguration>) {
+        val sessionId = recordingSessionId ?: return
+        if (!isRecording.get() || !recordingCallbackRegistered.get()) return
+
+        val config = configs.firstOrNull { it.clientAudioSessionId == sessionId }
+        if (config == null) {
+            if (recordingConfigObserved.get()) {
+                handleRecordingInterrupted("Audio recording config disappeared during active recording")
+            }
+            return
+        }
+        recordingConfigObserved.set(true)
+
+        val isSilenced = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && config.isClientSilenced
+        Log.d(
+            Constants.TAG,
+            "Recording config changed: session=$sessionId source=${config.clientAudioSource} silenced=$isSilenced"
+        )
+
+        if (isSilenced) {
+            handleRecordingInterrupted("Audio recording client was silenced by system policy")
+        }
+    }
+
+    private fun handleRecordingInterrupted(message: String) {
+        if (!recordingInterruptionHandled.compareAndSet(false, true)) return
+
+        Log.w(Constants.TAG, "Recording interrupted: $message")
+        emitRecordingError("RECORDING_INTERRUPTED", message, isFatal = true)
+        synchronized(audioRecordLock) {
+            if (isRecording.get()) {
+                cleanupResources()
+            }
         }
     }
 
@@ -359,6 +440,7 @@ class AudioRecorderManager(
         isFatal: Boolean,
         autoResuming: Boolean = false
     ) {
+        val currentStreamUuid = streamUuid
         mainHandler.post {
             try {
                 // Backward-compat: keep the error variant on AudioData for existing consumers
@@ -366,7 +448,7 @@ class AudioRecorderManager(
                     Constants.AUDIO_EVENT_NAME, bundleOf(
                         "error" to code,
                         "errorMessage" to message,
-                        "streamUuid" to streamUuid
+                        "streamUuid" to currentStreamUuid
                     )
                 )
                 // Rich structured channel for new consumers
