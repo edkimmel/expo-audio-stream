@@ -129,15 +129,21 @@ export interface RecordingConfig {
   enableProcessing?: boolean; // Boolean to enable/disable audio processing (default is false)
   pointsPerSecond?: number; // Number of data points to extract per second of audio (default is 1000)
   onAudioStream?: (event: AudioDataEvent) => Promise<void>; // Callback function to handle audio stream
-  /** Fired when the native layer reports a mid-recording error (e.g. system
-   * interruption like Siri or a phone call). The consumer should treat the
-   * recording session as terminated and clean up. */
+  /** Fired when the native layer reports a mid-recording error.
+   * Examples include iOS audio session interruptions and Android recording
+   * policy interruptions such as an incoming phone call silencing the mic.
+   * When `isFatal` is true, treat the recording session as terminated and
+   * clean up before starting a new one. */
   onError?: (event: MicrophoneErrorEvent) => void;
   /** Optional frequency band crossover configuration. */
   frequencyBandConfig?: FrequencyBandConfig;
 }
 
 export interface MicrophoneErrorEvent {
+  /**
+   * Native error identifier. Android system microphone interruptions are
+   * reported as `RECORDING_INTERRUPTED`.
+   */
   code: string;
   message: string;
   /**
