@@ -10,6 +10,7 @@ import type {
   FrequencyBands,
 } from "@edkimmel/expo-audio-stream";
 import type { EventSubscription } from "expo-modules-core";
+import { MicrophoneErrorEvent } from "@edkimmel/expo-audio-stream/types";
 
 const ANDROID_SAMPLE_RATE = 24000;
 const IOS_SAMPLE_RATE = 24000;
@@ -66,6 +67,14 @@ export default function App() {
   const onAudioCallback = async (audio: AudioDataEvent) => {
     if (audio.frequencyBands) {
       setMicBands(audio.frequencyBands);
+    }
+  };
+
+  const onMicError = async(err: MicrophoneErrorEvent) => {
+    console.debug(`Mic error: ${err.code} ${err.message} willResume=${err.autoResuming} fatal=${err.isFatal}`)
+    if (err.isFatal || !err.autoResuming) {
+      await ExpoPlayAudioStream.stopMicrophone();
+      setIsRecording(false)
     }
   };
 
@@ -220,6 +229,7 @@ export default function App() {
               channels: CHANNELS,
               encoding: ENCODING,
               onAudioStream: onAudioCallback,
+              onError: onMicError,
               frequencyBandConfig: {
                 lowCrossoverHz: 300,
                 highCrossoverHz: 2000,

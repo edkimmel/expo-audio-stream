@@ -49,7 +49,33 @@ extension SharedAudioEngineDelegate {
 class SharedAudioEngine {
     private static let TAG = "SharedAudioEngine"
 
-    private let lock = NSRecursiveLock()
+    /// The single serial queue that owns ALL engine graph work: every
+    /// attach/detach/connect/stop/start/configure/teardown, the playback
+    /// `scheduleBuffer` loop (driven from AudioPipeline), and route/interruption
+    /// handling. Serial ordering here is what makes the AVAudioPlayerNode
+    /// `stop()`/`scheduleBuffer()` deadlock structurally impossible — they can't
+    /// overlap on one serial queue. AVFoundation callbacks hop on via `async`
+    /// (never `sync` — they may run with an AV lock held); Expo functions enter
+    /// via `performSync`. Replaces the former recursive lock.
+    let engineQueue = DispatchQueue(label: "expo.modules.audio.engine")
+    private static let queueKey = DispatchSpecificKey<Void>()
+
+    init() {
+        engineQueue.setSpecific(key: SharedAudioEngine.queueKey, value: ())
+    }
+
+    /// Run `work` synchronously in the engine's serial domain. Re-entrancy-aware:
+    /// if we're already on `engineQueue` (a delegate callback fired from
+    /// `notifyDelegates`, or `configure` calling `teardown`/`attachNode`) we run
+    /// inline instead of dead-locking on `engineQueue.sync`. This is exactly what
+    /// the *recursive* lock used to provide. Callers on AVFoundation callback
+    /// threads must use `engineQueue.async` instead — never this.
+    func performSync<T>(_ work: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: SharedAudioEngine.queueKey) != nil {
+            return try work()
+        }
+        return try engineQueue.sync(execute: work)
+    }
 
     // ── Engine state ─────────────────────────────────────────────────────
     private(set) var engine: AVAudioEngine?
@@ -61,17 +87,17 @@ class SharedAudioEngine {
     private let delegates = NSHashTable<AnyObject>.weakObjects()
 
     func addDelegate(_ d: SharedAudioEngineDelegate) {
-        lock.lock()
-        defer { lock.unlock() }
-        if !delegates.contains(d as AnyObject) {
-            delegates.add(d as AnyObject)
+        performSync {
+            if !delegates.contains(d as AnyObject) {
+                delegates.add(d as AnyObject)
+            }
         }
     }
 
     func removeDelegate(_ d: SharedAudioEngineDelegate) {
-        lock.lock()
-        defer { lock.unlock() }
-        delegates.remove(d as AnyObject)
+        performSync {
+            delegates.remove(d as AnyObject)
+        }
     }
 
     private func notifyDelegates(_ block: (SharedAudioEngineDelegate) -> Void) {
@@ -100,8 +126,10 @@ class SharedAudioEngine {
     ///
     /// - Parameter playbackMode: Determines whether voice processing is enabled.
     func configure(playbackMode: PlaybackMode) throws {
-        lock.lock()
-        defer { lock.unlock() }
+        try performSync { try configureOnQueue(playbackMode: playbackMode) }
+    }
+
+    private func configureOnQueue(playbackMode: PlaybackMode) throws {
         if isConfigured && self.playbackMode == playbackMode && engine?.isRunning == true {
             Logger.debug("[\(SharedAudioEngine.TAG)] Already configured for \(playbackMode) and engine running, skipping")
             return
@@ -168,8 +196,10 @@ class SharedAudioEngine {
     /// Connects `node → mainMixerNode` with the given format.
     /// The mixer handles sample-rate conversion to hardware output.
     func attachNode(_ node: AVAudioPlayerNode, format: AVAudioFormat) {
-        lock.lock()
-        defer { lock.unlock() }
+        performSync { attachNodeOnQueue(node, format: format) }
+    }
+
+    private func attachNodeOnQueue(_ node: AVAudioPlayerNode, format: AVAudioFormat) {
         guard let engine = engine else {
             Logger.debug("[\(SharedAudioEngine.TAG)] attachNode called but engine is nil")
             return
@@ -184,8 +214,10 @@ class SharedAudioEngine {
 
     /// Detach a consumer's player node from the shared engine.
     func detachNode(_ node: AVAudioPlayerNode) {
-        lock.lock()
-        defer { lock.unlock() }
+        performSync { detachNodeOnQueue(node) }
+    }
+
+    private func detachNodeOnQueue(_ node: AVAudioPlayerNode) {
         guard let engine = engine else { return }
 
         node.pause()
@@ -209,8 +241,10 @@ class SharedAudioEngine {
 
     /// Tear down the engine completely. Called on reconfigure or module destroy.
     func teardown() {
-        lock.lock()
-        defer { lock.unlock() }
+        performSync { teardownOnQueue() }
+    }
+
+    private func teardownOnQueue() {
         // Remove observers
         NotificationCenter.default.removeObserver(
             self, name: AVAudioSession.routeChangeNotification, object: nil)
@@ -260,10 +294,15 @@ class SharedAudioEngine {
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
             return
         }
+        // Hop off AVFoundation's notification thread onto the engine queue before
+        // touching the engine or session — that thread can hold an internal lock
+        // when delivering this, and the queue serializes us against connect/disconnect.
+        engineQueue.async { [weak self] in
+            self?.handleRouteChangeOnQueue(reason: reason)
+        }
+    }
 
-        lock.lock()
-        defer { lock.unlock() }
-
+    private func handleRouteChangeOnQueue(reason: AVAudioSession.RouteChangeReason) {
         let routeDescription = AVAudioSession.sharedInstance().currentRoute.outputs
             .map { "\($0.portName) (\($0.portType.rawValue))" }
             .joined(separator: ", ")
@@ -410,7 +449,7 @@ class SharedAudioEngine {
             // Voice processing can cause the engine to die asynchronously after
             // appearing to start. Wait 100ms then re-verify before declaring success.
             let verifyDelay: TimeInterval = (self.playbackMode == .conversation || self.playbackMode == .voiceProcessing) ? 0.1 : 0.05
-            DispatchQueue.main.asyncAfter(deadline: .now() + verifyDelay) { [weak self] in
+            self.engineQueue.asyncAfter(deadline: .now() + verifyDelay) { [weak self] in
                 guard let self = self, let engine = self.engine else {
                     self?.isRebuildingForRouteChange = false
                     return
@@ -449,7 +488,7 @@ class SharedAudioEngine {
 
         if delay > 0 {
             Logger.debug("[\(SharedAudioEngine.TAG)] Waiting \(Int(delay * 1000))ms before attempt \(attempt + 1)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            engineQueue.asyncAfter(deadline: .now() + delay, execute: work)
         } else {
             work()
         }
@@ -493,16 +532,19 @@ class SharedAudioEngine {
         guard let info = notification.userInfo,
               let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+        let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+        // Hop off AVFoundation's notification thread onto the engine queue.
+        engineQueue.async { [weak self] in
+            self?.handleInterruptionOnQueue(type: type, optionsValue: optionsValue)
+        }
+    }
 
-        lock.lock()
-        defer { lock.unlock() }
-
+    private func handleInterruptionOnQueue(type: AVAudioSession.InterruptionType, optionsValue: UInt) {
         if type == .began {
             Logger.debug("[\(SharedAudioEngine.TAG)] Audio session interruption began")
             notifyDelegates { $0.audioSessionInterruptionBegan() }
         } else if type == .ended {
             Logger.debug("[\(SharedAudioEngine.TAG)] Audio session interruption ended")
-            let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
             guard options.contains(.shouldResume) else {
                 // shouldResume absent — system hints we should not restart yet.
@@ -529,6 +571,8 @@ class SharedAudioEngine {
     }
 
     deinit {
-        teardown()
+        // At dealloc there are no other references, so no concurrency — run the
+        // body directly rather than dispatching onto the queue during teardown.
+        teardownOnQueue()
     }
 }

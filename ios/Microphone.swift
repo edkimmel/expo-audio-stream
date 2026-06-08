@@ -9,6 +9,14 @@ class Microphone: SharedAudioEngineDelegate {
     /// Must be set and configured before calling startRecording.
     weak var sharedAudioEngine: SharedAudioEngine?
 
+    /// Serial queue for mic-input processing. The tap fires on AVFoundation's
+    /// real-time render thread; we copy the buffer and hop here so resampling,
+    /// frequency analysis and the JS `sendEvent` never run on that thread (a
+    /// real-time violation that can stall capture or invert priority). Kept
+    /// separate from the engine queue so a congested JS bridge on the mic path
+    /// can't stall playback scheduling.
+    private let micQueue = DispatchQueue(label: "expo.modules.audio.microphone")
+
     public private(set) var isVoiceProcessingEnabled: Bool = false
 
     internal var lastEmittedSize: Int64 = 0
@@ -214,20 +222,39 @@ class Microphone: SharedAudioEngineDelegate {
             guard let self = self else { return }
             guard buffer.frameLength > 0 else {
                 Logger.debug("[Microphone] Received empty buffer in tap callback")
-                self.delegate?.onMicrophoneError(MicrophoneErrorInfo(
-                    code: "READ_ERROR",
-                    message: "Received empty audio buffer",
-                    isFatal: false,
-                    autoResuming: false
-                ))
+                self.micQueue.async {
+                    self.delegate?.onMicrophoneError(MicrophoneErrorInfo(
+                        code: "READ_ERROR",
+                        message: "Received empty audio buffer",
+                        isFatal: false,
+                        autoResuming: false
+                    ))
+                }
                 return
             }
-            self.processAudioBuffer(buffer)
-            self.lastBufferTime = time
+            // Convert on the render thread — the tap buffer is only valid here, and
+            // the conversion yields the `Data` we'd build anyway, so there's no
+            // extra copy. Hand the value-typed result to the serial queue; only the
+            // JS-bridge delivery (sendEvent) runs off the render thread. Nothing
+            // here re-enters the engine, so no separate queue is needed for safety —
+            // micQueue exists purely to keep the bridge call off the render thread
+            // and preserve chunk ordering.
+            guard let payload = self.extractMicData(from: buffer) else { return }
+            self.micQueue.async {
+                self.totalDataSize += Int64(payload.data.count)
+                self.delegate?.onMicrophoneData(payload.data, payload.powerLevel, payload.bands)
+                self.lastEmittedSize = self.totalDataSize
+                self.lastBufferTime = time
+            }
         }
     }
 
-    private func processAudioBuffer(_ buffer: AVAudioPCMBuffer) {
+    /// Convert a tap buffer into the value-typed payload the delegate needs
+    /// (PCM `Data`, power level, frequency bands). Runs on the audio render
+    /// thread — it needs the live buffer — but does no cross-thread work, so the
+    /// caller hands the result to `micQueue` for the JS-bridge delivery. Returns
+    /// nil if the buffer yields no data.
+    private func extractMicData(from buffer: AVAudioPCMBuffer) -> (data: Data, powerLevel: Float, bands: FrequencyBands?)? {
         let targetSampleRate = recordingSettings?.desiredSampleRate ?? buffer.format.sampleRate
         let targetBitDepth = recordingSettings?.bitDepth ?? 16
         var currentBuffer = buffer
@@ -271,7 +298,7 @@ class Microphone: SharedAudioEngineDelegate {
             let audioData = currentBuffer.audioBufferList.pointee.mBuffers
             guard let bufferData = audioData.mData else {
                 Logger.debug("[Microphone] Buffer data is nil.")
-                return
+                return nil
             }
             data = Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
         }
@@ -286,8 +313,6 @@ class Microphone: SharedAudioEngineDelegate {
             bands = nil
         }
 
-        totalDataSize += Int64(data.count)
-        self.delegate?.onMicrophoneData(data, powerLevel, bands)
-        self.lastEmittedSize = totalDataSize
+        return (data, powerLevel, bands)
     }
 }

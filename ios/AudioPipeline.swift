@@ -85,6 +85,15 @@ class AudioPipeline: SharedAudioEngineDelegate {
     /// This prevents duplicate chains and stale callbacks from re-entering after a rebuild.
     private var scheduleGeneration: Int = 0
 
+    /// All `node.scheduleBuffer(...)` calls for this pipeline run on the shared
+    /// engine's serial `engineQueue` (the same queue that owns stop/detach/attach),
+    /// so `scheduleBuffer()` and teardown's `stop()` can never overlap — that
+    /// overlap is the AVAudioPlayerNode deadlock (AttachAndEngineLock ⇄
+    /// RealtimeMessenger). The buffer-completion callback re-arms via
+    /// `engineQueue.async` (returns immediately so `stop()`'s message flush isn't
+    /// blocked); teardown runs on the same queue via `sharedEngine.performSync`,
+    /// so it's serialized after any in-flight scheduling with no explicit barrier.
+
     /// Pending PlaybackStopped dispatch — cancelled on new turn / disconnect.
     /// Always mutate from the main queue to avoid races with the drain timer.
     private var pendingPlaybackStoppedWork: DispatchWorkItem?
@@ -134,12 +143,26 @@ class AudioPipeline: SharedAudioEngineDelegate {
         }
         setState(.connecting)
 
-        do {
-            guard let sharedEngine = sharedEngine else {
-                throw NSError(domain: "AudioPipeline", code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "SharedAudioEngine not set"])
-            }
+        guard let sharedEngine = sharedEngine else {
+            setState(.error)
+            throw NSError(domain: "AudioPipeline", code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "SharedAudioEngine not set"])
+        }
 
+        do {
+            // All graph setup runs on the engine's serial queue so attach / play /
+            // seed are serialized against route-change, scheduleBuffer and teardown.
+            try sharedEngine.performSync { try self.connectOnQueue(sharedEngine: sharedEngine) }
+        } catch {
+            Logger.debug("[\(AudioPipeline.TAG)] connect() failed: \(error)")
+            setState(.error)
+            disconnect()
+            throw error
+        }
+    }
+
+    /// Graph setup for `connect()`. Runs entirely on `sharedEngine.engineQueue`.
+    private func connectOnQueue(sharedEngine: SharedAudioEngine) throws {
             // ── 1. JitterBuffer ─────────────────────────────────────────
             jitterBuffer = JitterBuffer(
                 sampleRate: sampleRate,
@@ -199,17 +222,26 @@ class AudioPipeline: SharedAudioEngineDelegate {
             Logger.debug("[\(AudioPipeline.TAG)] Connected — sampleRate=\(sampleRate) " +
                 "ch=\(channelCount) frameSamples=\(frameSizeSamples) " +
                 "targetBuffer=\(targetBufferMs)ms")
-        } catch {
-            Logger.debug("[\(AudioPipeline.TAG)] connect() failed: \(error)")
-            setState(.error)
-            disconnect()
-            throw error
-        }
     }
 
     func disconnect() {
+        // Run teardown on the engine's serial queue so it's serialized after any
+        // in-flight scheduleBuffer pass and against route-change/interruption —
+        // no explicit barrier needed. If the shared engine is already gone
+        // (module destroyed), just clean up local state.
+        if let sharedEngine = sharedEngine {
+            sharedEngine.performSync { self.disconnectOnQueue() }
+        } else {
+            disconnectOnQueue()
+        }
+    }
+
+    /// Teardown body. Runs on `sharedEngine.engineQueue` (via `performSync`), so
+    /// `running = false` and `detachNode`'s `stop()` are ordered after any
+    /// scheduling pass; a buffer completion that fires during `stop()` only
+    /// re-enqueues onto the same queue and then bails on `running == false`.
+    private func disconnectOnQueue() {
         // Cancel any pending PlaybackStopped before tearing down.
-        // DispatchWorkItem.cancel is thread-safe; we may be on any queue here.
         pendingPlaybackStoppedWork?.cancel()
         pendingPlaybackStoppedWork = nil
 
@@ -227,7 +259,8 @@ class AudioPipeline: SharedAudioEngineDelegate {
         frequencyBandAnalyzer = nil
         lastEmittedBands = nil
 
-        // Detach node from shared engine (handles pause/stop/disconnect/detach)
+        // Detach node from shared engine (handles pause/stop/disconnect/detach).
+        // detachNode is performSync → runs inline since we're already on the queue.
         if let node = playerNode {
             sharedEngine?.detachNode(node)
         }
@@ -344,6 +377,11 @@ class AudioPipeline: SharedAudioEngineDelegate {
     func audioSessionInterruptionEnded() {
         Logger.debug("[\(AudioPipeline.TAG)] Audio session interruption ended")
         isInterrupted = false
+        // Reset the zombie baseline as we clear the interruption: scheduling was
+        // stalled while interrupted, and the re-seed below runs asynchronously on
+        // the engine queue, so without this the zombie timer could false-positive
+        // in the gap before the first resumed buffer is scheduled.
+        lastScheduleTime = Date()
         // Engine already restarted by SharedAudioEngine. Re-seed scheduling.
         if running {
             scheduleGeneration += 1
@@ -465,7 +503,19 @@ class AudioPipeline: SharedAudioEngineDelegate {
     // Scheduling loop
     // ════════════════════════════════════════════════════════════════════
 
+    /// Request one buffer-scheduling pass. Hops onto the shared engine's serial
+    /// `engineQueue` so the actual `scheduleBuffer()` is serialized against
+    /// teardown's `stop()` and graph mutations. All re-seed call sites (connect,
+    /// route change, rebuild, interruption) use this; the completion handler
+    /// re-arms via `engineQueue.async` directly (see below).
     private func scheduleNextBuffer() {
+        sharedEngine?.engineQueue.async { [weak self] in
+            self?.scheduleNextBufferOnQueue()
+        }
+    }
+
+    /// Build and schedule the next PCM buffer. MUST run on `engineQueue`.
+    private func scheduleNextBufferOnQueue() {
         guard running,
               let se = sharedEngine, !se.isRebuilding,
               let buf = jitterBuffer,
@@ -521,11 +571,21 @@ class AudioPipeline: SharedAudioEngineDelegate {
         lastScheduleTime = Date()
 
         node.scheduleBuffer(pcmBuffer) { [weak self] in
-            guard let self = self, self.running else { return }
-            // Bail if this completion belongs to a previous scheduling generation
-            // (route change rebuilt the engine while this buffer was in flight).
-            guard self.scheduleGeneration == capturedGeneration else { return }
-            self.scheduleNextBuffer()
+            guard let self = self else { return }
+            // Re-arm on the engine queue. Returning from this completion callback
+            // IMMEDIATELY is essential: AVAudioPlayerNode.stop() flushes pending
+            // completion messages synchronously while holding the engine lock, so
+            // calling scheduleBuffer() inline here would deadlock a concurrent
+            // stop() (AttachAndEngineLock ⇄ RealtimeMessenger mutex). Hopping to
+            // engineQueue lets stop() drain us without blocking, and serializes
+            // the next scheduleBuffer() against teardown on the same queue.
+            self.sharedEngine?.engineQueue.async {
+                // Bail if torn down, or if this completion belongs to a previous
+                // scheduling generation (route change rebuilt the engine while
+                // this buffer was in flight).
+                guard self.running, self.scheduleGeneration == capturedGeneration else { return }
+                self.scheduleNextBufferOnQueue()
+            }
         }
     }
 
@@ -631,7 +691,11 @@ class AudioPipeline: SharedAudioEngineDelegate {
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
             let stalledMs = Int64(Date().timeIntervalSince(self.lastScheduleTime) * 1000)
+            // Don't flag a zombie while interrupted: the engine is stopped, so
+            // scheduling legitimately stalls (no buffers feed) until resume. The
+            // stall is expected, not a dead scheduling loop.
             if stalledMs >= AudioPipeline.ZOMBIE_STALL_THRESHOLD_MS &&
+               !self.isInterrupted &&
                (self.state == .streaming || self.state == .draining) {
                 Logger.debug("[\(AudioPipeline.TAG)] Zombie detected! stalledMs=\(stalledMs)")
                 self.listener?.onZombieDetected(stalledMs: stalledMs)
