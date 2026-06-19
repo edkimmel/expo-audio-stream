@@ -40,13 +40,22 @@ export default function App() {
     message: string;
   } | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [isSilenced, setIsSilenced] = useState(false);
   const [audioLevel, setAudioLevel] = useState(-180)
   const [micBands, setMicBands] = useState<FrequencyBands | null>(null);
   const [pipelineBands, setPipelineBands] = useState<FrequencyBands | null>(null);
+  const [driftMetrics, setDriftMetrics] = useState<{
+    clockSec: number;
+    pcmSec: number;
+    driftSec: number;
+    driftPct: number;
+  } | null>(null);
 
   const eventListenerSubscriptionRef = useRef<EventSubscription | undefined>(
     undefined
   );
+  const recordingStartRef = useRef<number | null>(null);
+  const recordingSampleRateRef = useRef<number>(24000);
 
   const pipelineSubsRef = useRef<{ remove: () => void }[]>([]);
 
@@ -70,7 +79,16 @@ export default function App() {
     if (audio.frequencyBands) {
       setMicBands(audio.frequencyBands);
     }
-    setAudioLevel(audio.soundLevel ?? -180)
+    setAudioLevel(audio.soundLevel ?? -180);
+
+    if (recordingStartRef.current !== null) {
+      const clockSec = (Date.now() - recordingStartRef.current) / 1000;
+      const bytesPerSample = 2; // pcm_16bit = 2 bytes
+      const pcmSec = audio.totalSize / (recordingSampleRateRef.current * CHANNELS * bytesPerSample);
+      const driftSec = pcmSec - clockSec;
+      const driftPct = clockSec > 0 ? (driftSec / clockSec) * 100 : 0;
+      setDriftMetrics({ clockSec, pcmSec, driftSec, driftPct });
+    }
   };
 
   const onMicError = async(err: MicrophoneErrorEvent) => {
@@ -267,6 +285,9 @@ export default function App() {
             });
           console.log("Recording started:", JSON.stringify(recordingResult));
           eventListenerSubscriptionRef.current = subscription;
+          recordingStartRef.current = Date.now();
+          recordingSampleRateRef.current = sampleRate;
+          setDriftMetrics(null);
           setIsRecording(true);
         }}
         title="Start Microphone"
@@ -278,19 +299,33 @@ export default function App() {
           await ExpoPlayAudioStream.stopMicrophone();
           eventListenerSubscriptionRef.current?.remove();
           eventListenerSubscriptionRef.current = undefined;
+          recordingStartRef.current = null;
           setIsRecording(false);
+          setIsSilenced(false);
           setMicBands(null);
         }}
         title="Stop Microphone"
       />
+      <Spacer />
+
+      <Button
+        disabled={!isRecording}
+        onPress={() => {
+          const next = !isSilenced;
+          ExpoPlayAudioStream.toggleSilence(next);
+          setIsSilenced(next);
+        }}
+        title={isSilenced ? "Disable Silence" : "Enable Silence"}
+      />
 
       <Text style={styles.status}>
-        Mic: {isRecording ? "recording" : "idle"}
+        Mic: {isRecording ? (isSilenced ? "silenced" : "recording") : "idle"}
       </Text>
       {audioLevel && <Text style={styles.status}>
         Mic: {audioLevel}
       </Text>}
       {micBands && <BandMeter label="Mic Bands" bands={micBands} />}
+      {driftMetrics && <DriftMeter metrics={driftMetrics} />}
 
       {/* ── Pipeline ───────────────────────────────────── */}
       <Text style={styles.section}>Pipeline</Text>
@@ -440,6 +475,36 @@ function BandMeter({ label, bands }: { label: string; bands: FrequencyBands }) {
   );
 }
 
+function DriftMeter({ metrics }: {
+  metrics: { clockSec: number; pcmSec: number; driftSec: number; driftPct: number };
+}) {
+  const fmt = (s: number) => s.toFixed(2) + "s";
+  const sign = (n: number) => (n >= 0 ? "+" : "");
+  const driftColor =
+    Math.abs(metrics.driftPct) < 2 ? "#4caf50"
+    : Math.abs(metrics.driftPct) < 5 ? "#ff9800"
+    : "#f44336";
+  return (
+    <View style={styles.bandContainer}>
+      <Text style={styles.bandLabel}>PCM Drift</Text>
+      <View style={styles.driftRow}>
+        <Text style={styles.driftLabel}>Clock</Text>
+        <Text style={styles.driftValue}>{fmt(metrics.clockSec)}</Text>
+      </View>
+      <View style={styles.driftRow}>
+        <Text style={styles.driftLabel}>PCM</Text>
+        <Text style={styles.driftValue}>{fmt(metrics.pcmSec)}</Text>
+      </View>
+      <View style={styles.driftRow}>
+        <Text style={styles.driftLabel}>Drift</Text>
+        <Text style={[styles.driftValue, { color: driftColor }]}>
+          {sign(metrics.driftSec)}{fmt(metrics.driftSec)} ({sign(metrics.driftPct)}{metrics.driftPct.toFixed(1)}%)
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
@@ -526,6 +591,21 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: "#999",
     textAlign: "right",
+  },
+  driftRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  driftLabel: {
+    fontSize: 12,
+    color: "#666",
+    width: 40,
+  },
+  driftValue: {
+    fontSize: 12,
+    color: "#333",
+    fontVariant: ["tabular-nums"],
   },
 });
 

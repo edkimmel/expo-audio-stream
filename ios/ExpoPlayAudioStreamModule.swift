@@ -31,6 +31,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
     }
 
     private var isAudioSessionInitialized: Bool = false
+    private var micTotalDataSize: Int = 0
 
     // ── PipelineEventSender conformance ───────────────────────────────
     func sendPipelineEvent(_ eventName: String, _ params: [String: Any]) {
@@ -150,6 +151,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
                         "sampleRate": result.sampleRate ?? 48000,
                         "mimeType": result.mimeType ?? "",
                     ]
+                    micTotalDataSize = 0
                     promise.resolve(resultDict)
                 }
             } else {
@@ -328,13 +330,15 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
 
     func onMicrophoneData(_ microphoneData: Data, _ soundLevel: Float?, _ frequencyBands: FrequencyBands?) {
         let encodedData = microphoneData.base64EncodedString()
+        let deltaSize = microphoneData.count
+        micTotalDataSize += deltaSize
         var eventBody: [String: Any] = [
             "fileUri": "",
             "lastEmittedSize": 0,
             "position": 0,
             "encoded": encodedData,
-            "deltaSize": 0,
-            "totalSize": 0,
+            "deltaSize": deltaSize,
+            "totalSize": micTotalDataSize,
             "mimeType": "",
             "soundLevel": soundLevel ?? -160
         ]

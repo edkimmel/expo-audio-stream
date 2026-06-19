@@ -301,7 +301,8 @@ class Microphone: SharedAudioEngineDelegate {
 
         let data: Data
         if isSilent {
-            let byteCount = Int(currentBuffer.frameCapacity) * Int(currentBuffer.format.streamDescription.pointee.mBytesPerFrame)
+            let bytesPerSample = targetBitDepth / 8
+            let byteCount = Int(currentBuffer.frameLength) * Int(currentBuffer.format.channelCount) * bytesPerSample
             data = Data(repeating: 0, count: byteCount)
         } else if targetBitDepth == 16 && currentBuffer.format.commonFormat == .pcmFormatFloat32,
                   let floatData = currentBuffer.floatChannelData {
