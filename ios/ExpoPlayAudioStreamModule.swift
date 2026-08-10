@@ -31,6 +31,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
     }
 
     private var isAudioSessionInitialized: Bool = false
+    private var micTotalDataSize: Int = 0
 
     // ── PipelineEventSender conformance ───────────────────────────────
     func sendPipelineEvent(_ eventName: String, _ params: [String: Any]) {
@@ -135,7 +136,23 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
                     try self.sharedAudioEngine.configure(playbackMode: .conversation)
                 }
             } catch {
-                promise.reject("ERROR", "Failed to init audio session: \(error.localizedDescription)")
+                // Surface a typed code so callers can distinguish a contended
+                // session (another audio source holding priority) from a genuine
+                // config failure. AVAudioSessionErrorInsufficientPriority shows up
+                // here as "Session activation failed".
+                let nsError = error as NSError
+                let code: String
+                switch nsError.code {
+                case Int(AVAudioSession.ErrorCode.insufficientPriority.rawValue):
+                    code = "SESSION_INSUFFICIENT_PRIORITY"
+                case Int(AVAudioSession.ErrorCode.isBusy.rawValue):
+                    code = "SESSION_BUSY"
+                case Int(AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue):
+                    code = "SESSION_CANNOT_INTERRUPT_OTHERS"
+                default:
+                    code = "SESSION_INIT_FAILED"
+                }
+                promise.reject(code, "Failed to init audio session: \(error.localizedDescription) (osstatus=\(nsError.code))")
                 return
             }
 
@@ -150,6 +167,7 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
                         "sampleRate": result.sampleRate ?? 48000,
                         "mimeType": result.mimeType ?? "",
                     ]
+                    micTotalDataSize = 0
                     promise.resolve(resultDict)
                 }
             } else {
@@ -163,6 +181,10 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
 
         Function("toggleSilence") { (isSilent: Bool) in
             microphone.toggleSilence(isSilent: isSilent)
+        }
+
+        Function("setMicrophoneGain") { (gain: Double) in
+            microphone.setMicrophoneGain(Float(gain))
         }
 
         // ── Pipeline functions ────────────────────────────────────────────
@@ -287,8 +309,38 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
             let preferredDuration = 512.0 / hwSampleRate
             try audioSession.setPreferredIOBufferDuration(preferredDuration)
         }
-        try audioSession.setActive(true)
+
+        // setActive(true) fails with AVAudioSessionErrorInsufficientPriority
+        // ("Session activation failed") when another audio source still holds the
+        // shared session — e.g. a separate playback library finishing a clip just
+        // before recording starts. iOS releases priority a moment later, so a single
+        // short-delayed retry recovers the common case. Only the transient
+        // insufficient-priority / busy errors are retried; genuine config failures
+        // rethrow immediately.
+        do {
+            try audioSession.setActive(true)
+        } catch let error as NSError where ExpoPlayAudioStreamModule.isTransientActivationError(error) {
+            Logger.debug("[AudioSession] setActive(true) failed transiently (\(error.code)); retrying once: \(error.localizedDescription)")
+            Thread.sleep(forTimeInterval: 0.15)
+            try audioSession.setActive(true)
+        }
         isAudioSessionInitialized = true
+     }
+
+    /// True for activation errors iOS reports when the shared session is
+    /// transiently held by another source (another app/library finishing audio,
+    /// a just-ended system call). These are worth a single retry; other errors
+    /// (bad category config, denied permission) are not.
+    private static func isTransientActivationError(_ error: NSError) -> Bool {
+        guard error.domain == NSOSStatusErrorDomain else { return false }
+        switch error.code {
+        case Int(AVAudioSession.ErrorCode.insufficientPriority.rawValue),
+             Int(AVAudioSession.ErrorCode.isBusy.rawValue),
+             Int(AVAudioSession.ErrorCode.cannotInterruptOthers.rawValue):
+            return true
+        default:
+            return false
+        }
      }
 
     // used for voice isolation, experimental
@@ -324,13 +376,15 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
 
     func onMicrophoneData(_ microphoneData: Data, _ soundLevel: Float?, _ frequencyBands: FrequencyBands?) {
         let encodedData = microphoneData.base64EncodedString()
+        let deltaSize = microphoneData.count
+        micTotalDataSize += deltaSize
         var eventBody: [String: Any] = [
             "fileUri": "",
             "lastEmittedSize": 0,
             "position": 0,
             "encoded": encodedData,
-            "deltaSize": 0,
-            "totalSize": 0,
+            "deltaSize": deltaSize,
+            "totalSize": micTotalDataSize,
             "mimeType": "",
             "soundLevel": soundLevel ?? -160
         ]

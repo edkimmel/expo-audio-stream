@@ -10,8 +10,9 @@ import type {
   FrequencyBands,
 } from "@edkimmel/expo-audio-stream";
 import type { EventSubscription } from "expo-modules-core";
+import { MicrophoneErrorEvent } from "@edkimmel/expo-audio-stream/types";
 
-const ANDROID_SAMPLE_RATE = 24000;
+const ANDROID_SAMPLE_RATE = 16000;
 const IOS_SAMPLE_RATE = 24000;
 const CHANNELS = 1;
 const ENCODING = "pcm_16bit";
@@ -39,16 +40,31 @@ export default function App() {
     message: string;
   } | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [isSilenced, setIsSilenced] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(-180)
   const [micBands, setMicBands] = useState<FrequencyBands | null>(null);
   const [pipelineBands, setPipelineBands] = useState<FrequencyBands | null>(null);
+  const [driftMetrics, setDriftMetrics] = useState<{
+    clockSec: number;
+    pcmSec: number;
+    driftSec: number;
+    driftPct: number;
+  } | null>(null);
 
   const eventListenerSubscriptionRef = useRef<EventSubscription | undefined>(
     undefined
   );
+  const recordingStartRef = useRef<number | null>(null);
+  // Drift anchor: stamped from the FIRST audio packet (clock + cumulative bytes)
+  // so startup latency (route switch, AEC init, AudioRecord warmup) is excluded
+  // and the meter shows only drift *accumulation* under stress.
+  const driftAnchorRef = useRef<{ clock: number; bytes: number } | null>(null);
+  const recordingSampleRateRef = useRef<number>(24000);
 
   const pipelineSubsRef = useRef<{ remove: () => void }[]>([]);
 
   const chaosTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const gainRampRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
   const startChaosMonkey = () => {
     if (!chaosTimeoutRef.current) {
@@ -67,10 +83,36 @@ export default function App() {
     if (audio.frequencyBands) {
       setMicBands(audio.frequencyBands);
     }
+    setAudioLevel(audio.soundLevel ?? -180);
+
+    if (recordingStartRef.current !== null) {
+      const bytesPerSample = 2; // pcm_16bit = 2 bytes
+      const byteRate = recordingSampleRateRef.current * CHANNELS * bytesPerSample;
+      // Anchor on the first packet so the constant startup offset is removed and
+      // only accumulating drift/steps show up.
+      if (driftAnchorRef.current === null) {
+        driftAnchorRef.current = { clock: Date.now(), bytes: audio.totalSize };
+      }
+      const anchor = driftAnchorRef.current;
+      const clockSec = (Date.now() - anchor.clock) / 1000;
+      const pcmSec = (audio.totalSize - anchor.bytes) / byteRate;
+      const driftSec = pcmSec - clockSec;
+      const driftPct = clockSec > 0 ? (driftSec / clockSec) * 100 : 0;
+      setDriftMetrics({ clockSec, pcmSec, driftSec, driftPct });
+    }
+  };
+
+  const onMicError = async(err: MicrophoneErrorEvent) => {
+    console.debug(`Mic error: ${err.code} ${err.message} willResume=${err.autoResuming} fatal=${err.isFatal}`)
+    if (err.isFatal || !err.autoResuming) {
+      await ExpoPlayAudioStream.stopMicrophone();
+      setIsRecording(false)
+    }
   };
 
   useEffect(() => {
     return () => {
+      if (gainRampRef.current) clearInterval(gainRampRef.current);
       ExpoPlayAudioStream.destroy().catch();
     };
   }, []);
@@ -84,7 +126,7 @@ export default function App() {
         targetBufferMs: 80,
         playbackMode: "conversation",
         frequencyBandIntervalMs: 100,
-        audioMode: "mixWithOthers", // try "duckOthers" or "doNotMix" to compare
+        audioMode: "doNotMix",
       });
       console.log("Pipeline connected:", result);
 
@@ -101,6 +143,27 @@ export default function App() {
         "PipelinePlaybackStarted",
         async (e) => {
           console.log("Pipeline playback started, turnId:", e.turnId);
+          // Drop mic to 20% immediately, then ramp linearly back to 100% over 1.5s
+          // to give the AEC adaptive filter time to converge before the mic is loud.
+          if (gainRampRef.current) clearInterval(gainRampRef.current);
+          ExpoPlayAudioStream.setMicrophoneGain(0.2);
+          console.debug(`[mic] gain ${0.2}`)
+          const RAMP_MS = 1500;
+          const TICK_MS = 50;
+          const startedAt = Date.now();
+          gainRampRef.current = setInterval(() => {
+            const elapsed = Date.now() - startedAt;
+            if (elapsed >= RAMP_MS) {
+              ExpoPlayAudioStream.setMicrophoneGain(1.0);
+              console.debug(`[mic] gain ${1}`)
+              clearInterval(gainRampRef.current);
+              gainRampRef.current = undefined;
+              return;
+            }
+            const nextGain = 0.2 + 0.8 * (elapsed / RAMP_MS)
+            console.debug(`[mic] gain ${nextGain}`)
+            ExpoPlayAudioStream.setMicrophoneGain(nextGain);
+          }, TICK_MS);
         }
       );
 
@@ -158,6 +221,11 @@ export default function App() {
 
   const disconnectPipeline = async () => {
     try {
+      if (gainRampRef.current) {
+        clearInterval(gainRampRef.current);
+        gainRampRef.current = undefined;
+        ExpoPlayAudioStream.setMicrophoneGain(1.0);
+      }
       await Pipeline.disconnect();
       pipelineSubsRef.current.forEach((s) => s.remove());
       pipelineSubsRef.current = [];
@@ -220,6 +288,7 @@ export default function App() {
               channels: CHANNELS,
               encoding: ENCODING,
               onAudioStream: onAudioCallback,
+              onError: onMicError,
               frequencyBandConfig: {
                 lowCrossoverHz: 300,
                 highCrossoverHz: 2000,
@@ -227,6 +296,10 @@ export default function App() {
             });
           console.log("Recording started:", JSON.stringify(recordingResult));
           eventListenerSubscriptionRef.current = subscription;
+          recordingStartRef.current = Date.now();
+          driftAnchorRef.current = null; // re-anchor on first packet of this session
+          recordingSampleRateRef.current = sampleRate;
+          setDriftMetrics(null);
           setIsRecording(true);
         }}
         title="Start Microphone"
@@ -238,16 +311,34 @@ export default function App() {
           await ExpoPlayAudioStream.stopMicrophone();
           eventListenerSubscriptionRef.current?.remove();
           eventListenerSubscriptionRef.current = undefined;
+          recordingStartRef.current = null;
+          driftAnchorRef.current = null;
           setIsRecording(false);
+          setIsSilenced(false);
           setMicBands(null);
         }}
         title="Stop Microphone"
       />
+      <Spacer />
+
+      <Button
+        disabled={!isRecording}
+        onPress={() => {
+          const next = !isSilenced;
+          ExpoPlayAudioStream.toggleSilence(next);
+          setIsSilenced(next);
+        }}
+        title={isSilenced ? "Disable Silence" : "Enable Silence"}
+      />
 
       <Text style={styles.status}>
-        Mic: {isRecording ? "recording" : "idle"}
+        Mic: {isRecording ? (isSilenced ? "silenced" : "recording") : "idle"}
       </Text>
+      {audioLevel && <Text style={styles.status}>
+        Mic: {audioLevel}
+      </Text>}
       {micBands && <BandMeter label="Mic Bands" bands={micBands} />}
+      {driftMetrics && <DriftMeter metrics={driftMetrics} />}
 
       {/* ── Pipeline ───────────────────────────────────── */}
       <Text style={styles.section}>Pipeline</Text>
@@ -397,6 +488,36 @@ function BandMeter({ label, bands }: { label: string; bands: FrequencyBands }) {
   );
 }
 
+function DriftMeter({ metrics }: {
+  metrics: { clockSec: number; pcmSec: number; driftSec: number; driftPct: number };
+}) {
+  const fmt = (s: number) => s.toFixed(2) + "s";
+  const sign = (n: number) => (n >= 0 ? "+" : "");
+  const driftColor =
+    Math.abs(metrics.driftPct) < 2 ? "#4caf50"
+    : Math.abs(metrics.driftPct) < 5 ? "#ff9800"
+    : "#f44336";
+  return (
+    <View style={styles.bandContainer}>
+      <Text style={styles.bandLabel}>PCM Drift</Text>
+      <View style={styles.driftRow}>
+        <Text style={styles.driftLabel}>Clock</Text>
+        <Text style={styles.driftValue}>{fmt(metrics.clockSec)}</Text>
+      </View>
+      <View style={styles.driftRow}>
+        <Text style={styles.driftLabel}>PCM</Text>
+        <Text style={styles.driftValue}>{fmt(metrics.pcmSec)}</Text>
+      </View>
+      <View style={styles.driftRow}>
+        <Text style={styles.driftLabel}>Drift</Text>
+        <Text style={[styles.driftValue, { color: driftColor }]}>
+          {sign(metrics.driftSec)}{fmt(metrics.driftSec)} ({sign(metrics.driftPct)}{metrics.driftPct.toFixed(1)}%)
+        </Text>
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: {
     flexGrow: 1,
@@ -483,6 +604,21 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: "#999",
     textAlign: "right",
+  },
+  driftRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  driftLabel: {
+    fontSize: 12,
+    color: "#666",
+    width: 40,
+  },
+  driftValue: {
+    fontSize: 12,
+    color: "#333",
+    fontVariant: ["tabular-nums"],
   },
 });
 

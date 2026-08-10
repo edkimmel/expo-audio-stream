@@ -9,6 +9,14 @@ class Microphone: SharedAudioEngineDelegate {
     /// Must be set and configured before calling startRecording.
     weak var sharedAudioEngine: SharedAudioEngine?
 
+    /// Serial queue for mic-input processing. The tap fires on AVFoundation's
+    /// real-time render thread; we copy the buffer and hop here so resampling,
+    /// frequency analysis and the JS `sendEvent` never run on that thread (a
+    /// real-time violation that can stall capture or invert priority). Kept
+    /// separate from the engine queue so a congested JS bridge on the mic path
+    /// can't stall playback scheduling.
+    private let micQueue = DispatchQueue(label: "expo.modules.audio.microphone")
+
     public private(set) var isVoiceProcessingEnabled: Bool = false
 
     internal var lastEmittedSize: Int64 = 0
@@ -22,6 +30,9 @@ class Microphone: SharedAudioEngineDelegate {
 
     private var isRecording: Bool = false
     private var isSilent: Bool = false
+    // Read on the audio render thread, written from the JS thread.
+    // Float is 4 bytes / naturally aligned — atomic on ARM64, no lock needed.
+    private var micGain: Float = 1.0
     private var frequencyBandAnalyzer: FrequencyBandAnalyzer?
     private var frequencyBandConfig: (lowCrossoverHz: Float, highCrossoverHz: Float)?
 
@@ -116,6 +127,10 @@ class Microphone: SharedAudioEngineDelegate {
         self.isSilent = isSilent
     }
 
+    func setMicrophoneGain(_ gain: Float) {
+        micGain = max(0.0, min(1.0, gain))
+    }
+
     func startRecording(settings: RecordingSettings, intervalMilliseconds: Int,
                         frequencyBandConfig: (lowCrossoverHz: Float, highCrossoverHz: Float)? = nil) -> StartRecordingResult? {
         guard !isRecording else {
@@ -205,29 +220,63 @@ class Microphone: SharedAudioEngineDelegate {
         let hardwareFormat = inputNode.inputFormat(forBus: 0)
         recordingSettings?.sampleRate = hardwareFormat.sampleRate
 
+        // outputFormat is what the tap actually receives — under VoiceProcessingIO
+        // this may differ from inputFormat (VP may output at a different rate and
+        // adds internal metadata channels beyond channel 0).
+        let nodeOutputFormat = inputNode.outputFormat(forBus: 0)
+
         let intervalSamples = AVAudioFrameCount(
-            Double(intervalMilliseconds) / 1000.0 * hardwareFormat.sampleRate
+            Double(intervalMilliseconds) / 1000.0 * nodeOutputFormat.sampleRate
         )
         let tapBufferSize = max(intervalSamples, 256)
 
-        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: nil) { [weak self] (buffer, time) in
+        // Explicit mono Float32 format strips VP metadata channels. Passing format: nil
+        // here would deliver the raw VP output channels, corrupting the audio stream
+        // with echo-tracking metadata that bleeds into downstream processing.
+        let tapFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: nodeOutputFormat.sampleRate,
+            channels: 1,
+            interleaved: false
+        )
+
+        inputNode.installTap(onBus: 0, bufferSize: tapBufferSize, format: tapFormat) { [weak self] (buffer, time) in
             guard let self = self else { return }
             guard buffer.frameLength > 0 else {
                 Logger.debug("[Microphone] Received empty buffer in tap callback")
-                self.delegate?.onMicrophoneError(MicrophoneErrorInfo(
-                    code: "READ_ERROR",
-                    message: "Received empty audio buffer",
-                    isFatal: false,
-                    autoResuming: false
-                ))
+                self.micQueue.async {
+                    self.delegate?.onMicrophoneError(MicrophoneErrorInfo(
+                        code: "READ_ERROR",
+                        message: "Received empty audio buffer",
+                        isFatal: false,
+                        autoResuming: false
+                    ))
+                }
                 return
             }
-            self.processAudioBuffer(buffer)
-            self.lastBufferTime = time
+            // Convert on the render thread — the tap buffer is only valid here, and
+            // the conversion yields the `Data` we'd build anyway, so there's no
+            // extra copy. Hand the value-typed result to the serial queue; only the
+            // JS-bridge delivery (sendEvent) runs off the render thread. Nothing
+            // here re-enters the engine, so no separate queue is needed for safety —
+            // micQueue exists purely to keep the bridge call off the render thread
+            // and preserve chunk ordering.
+            guard let payload = self.extractMicData(from: buffer) else { return }
+            self.micQueue.async {
+                self.totalDataSize += Int64(payload.data.count)
+                self.delegate?.onMicrophoneData(payload.data, payload.powerLevel, payload.bands)
+                self.lastEmittedSize = self.totalDataSize
+                self.lastBufferTime = time
+            }
         }
     }
 
-    private func processAudioBuffer(_ buffer: AVAudioPCMBuffer) {
+    /// Convert a tap buffer into the value-typed payload the delegate needs
+    /// (PCM `Data`, power level, frequency bands). Runs on the audio render
+    /// thread — it needs the live buffer — but does no cross-thread work, so the
+    /// caller hands the result to `micQueue` for the JS-bridge delivery. Returns
+    /// nil if the buffer yields no data.
+    private func extractMicData(from buffer: AVAudioPCMBuffer) -> (data: Data, powerLevel: Float, bands: FrequencyBands?)? {
         let targetSampleRate = recordingSettings?.desiredSampleRate ?? buffer.format.sampleRate
         let targetBitDepth = recordingSettings?.bitDepth ?? 16
         var currentBuffer = buffer
@@ -252,7 +301,8 @@ class Microphone: SharedAudioEngineDelegate {
 
         let data: Data
         if isSilent {
-            let byteCount = Int(currentBuffer.frameCapacity) * Int(currentBuffer.format.streamDescription.pointee.mBytesPerFrame)
+            let bytesPerSample = targetBitDepth / 8
+            let byteCount = Int(currentBuffer.frameLength) * Int(currentBuffer.format.channelCount) * bytesPerSample
             data = Data(repeating: 0, count: byteCount)
         } else if targetBitDepth == 16 && currentBuffer.format.commonFormat == .pcmFormatFloat32,
                   let floatData = currentBuffer.floatChannelData {
@@ -261,7 +311,7 @@ class Microphone: SharedAudioEngineDelegate {
             var int16Data = Data(capacity: frameCount * channelCount * 2)
             for frame in 0..<frameCount {
                 for ch in 0..<channelCount {
-                    let sample = max(-1.0, min(1.0, floatData[ch][frame]))
+                    let sample = max(-1.0, min(1.0, floatData[ch][frame] * micGain))
                     var int16Sample = Int16(sample * 32767.0)
                     int16Data.append(Data(bytes: &int16Sample, count: 2))
                 }
@@ -271,7 +321,7 @@ class Microphone: SharedAudioEngineDelegate {
             let audioData = currentBuffer.audioBufferList.pointee.mBuffers
             guard let bufferData = audioData.mData else {
                 Logger.debug("[Microphone] Buffer data is nil.")
-                return
+                return nil
             }
             data = Data(bytes: bufferData, count: Int(audioData.mDataByteSize))
         }
@@ -286,8 +336,6 @@ class Microphone: SharedAudioEngineDelegate {
             bands = nil
         }
 
-        totalDataSize += Int64(data.count)
-        self.delegate?.onMicrophoneData(data, powerLevel, bands)
-        self.lastEmittedSize = totalDataSize
+        return (data, powerLevel, bands)
     }
 }

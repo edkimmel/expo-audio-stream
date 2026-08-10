@@ -168,8 +168,11 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         }
 
         Function("toggleSilence") { isSilent: Boolean ->
-            // Just toggle silence without returning any value
             audioRecorderManager.toggleSilence(isSilent)
+        }
+
+        Function("setMicrophoneGain") { gain: Double ->
+            audioRecorderManager.setMicrophoneGain(gain.toFloat())
         }
 
         // ── Native Audio Pipeline V3 ────────────────────────────────────
@@ -184,7 +187,8 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         }
 
         Function("pushPipelineAudioSync") { options: Map<String, Any?> ->
-            pipelineIntegration.pushAudioSync(options)
+            val result: Boolean = pipelineIntegration.pushAudioSync(options)
+            return@Function result
         }
 
         AsyncFunction("disconnectPipeline") { promise: Promise ->
@@ -201,11 +205,13 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         }
 
         Function("getPipelineState") {
-            pipelineIntegration.getState()
+            val state: String = pipelineIntegration.getState()
+            return@Function state
         }
 
         Function("getPipelineOutputLatencyMs") {
-            pipelineIntegration.outputLatencyMs()
+            val latencyMs: Double = pipelineIntegration.outputLatencyMs()
+            return@Function latencyMs
         }
 
     }
