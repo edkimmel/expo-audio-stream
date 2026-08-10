@@ -187,7 +187,8 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         }
 
         Function("pushPipelineAudioSync") { options: Map<String, Any?> ->
-            pipelineIntegration.pushAudioSync(options)
+            val result: Boolean = pipelineIntegration.pushAudioSync(options)
+            return@Function result
         }
 
         AsyncFunction("disconnectPipeline") { promise: Promise ->
@@ -204,11 +205,13 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
         }
 
         Function("getPipelineState") {
-            pipelineIntegration.getState()
+            val state: String = pipelineIntegration.getState()
+            return@Function state
         }
 
         Function("getPipelineOutputLatencyMs") {
-            pipelineIntegration.outputLatencyMs()
+            val latencyMs: Double = pipelineIntegration.outputLatencyMs()
+            return@Function latencyMs
         }
 
     }
