@@ -1,8 +1,11 @@
 name: Publish package to GitHub Packages and npm
+# NOTE: the release trigger is disabled — it's been broken (yarn honors
+# publishConfig.registry over setup-node's registry-url, so the GitHub
+# Packages step above actually hits registry.npmjs.org with the wrong
+# token and fails before the real npm step ever runs). Publishing has
+# been done manually via `npm publish` instead.
 on:
   workflow_dispatch:
-  release:
-    types: [published]
 jobs:
   build:
     runs-on: ubuntu-latest
