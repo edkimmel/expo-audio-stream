@@ -1,0 +1,150 @@
+name: CI
+
+# Runs on PR open/update against ANY base branch (stacked PRs included),
+# plus direct pushes to main and claude/** working branches.
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+# One run per commit: when a push and a pull_request event fire for the same
+# head SHA (branch with an open PR), the second run supersedes the first
+# instead of running the whole matrix twice.
+concurrency:
+  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  typescript:
+    name: TypeScript build & tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable corepack (Yarn 4)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build module (tsc)
+        run: yarn build
+
+      - name: Build config plugin
+        run: npx expo-module build plugin
+
+      - name: Run unit tests (jest)
+        run: yarn test
+
+  android:
+    name: Android build (example app)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Enable corepack (Yarn 4)
+        run: corepack enable
+
+      # Root install first: autolinking resolves the module from .. and the
+      # example's app.json loads ../app.plugin.js.
+      - name: Install module dependencies
+        run: yarn install --immutable
+
+      # app.plugin.js requires ./plugin/build, which this generates. npm runs
+      # the root `prepare` script on install; Yarn 4 does not, so CI builds it
+      # explicitly.
+      - name: Build config plugin
+        run: npx expo-module build plugin
+
+      - name: Install example dependencies
+        working-directory: example
+        run: yarn install --immutable
+
+      - name: Prebuild Android project
+        working-directory: example
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Kotlin unit tests (module)
+        working-directory: example/android
+        run: ./gradlew testDebugUnitTest
+
+      - name: Compile Android app + module
+        working-directory: example/android
+        run: ./gradlew assembleDebug
+
+  ios:
+    name: iOS build (example app)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Enable corepack (Yarn 4)
+        run: corepack enable
+
+      # Fast native-logic signal before the expensive app build: JitterBuffer
+      # is dependency-free Swift, compiled and run directly.
+      - name: Swift unit tests (JitterBuffer)
+        run: |
+          swiftc -parse-as-library -o /tmp/jitterbuffer-tests \
+            ios/JitterBuffer.swift tests/ios/JitterBufferTests.swift
+          /tmp/jitterbuffer-tests
+
+      - name: Install module dependencies
+        run: yarn install --immutable
+
+      # app.plugin.js requires ./plugin/build, which this generates. npm runs
+      # the root `prepare` script on install; Yarn 4 does not, so CI builds it
+      # explicitly.
+      - name: Build config plugin
+        run: npx expo-module build plugin
+
+      - name: Install example dependencies
+        working-directory: example
+        run: yarn install --immutable
+
+      - name: Prebuild iOS project
+        working-directory: example
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Install CocoaPods
+        working-directory: example
+        run: npx pod-install ios
+
+      - name: Compile iOS app + module
+        working-directory: example/ios
+        run: |
+          set -o pipefail
+          WORKSPACE=$(ls -d *.xcworkspace | head -n1)
+          SCHEME="${WORKSPACE%.xcworkspace}"
+          echo "Building workspace=$WORKSPACE scheme=$SCHEME"
+          xcodebuild build \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            | tail -n 200
