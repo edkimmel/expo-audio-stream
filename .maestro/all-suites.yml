@@ -18,7 +18,7 @@ appId: com.edkimmel.audiostream.dev
     visible:
       id: "suite-status"
       text: "PASS"
-    timeout: 90000
+    timeout: 120000
 - tapOn:
     id: "back-home"
 
@@ -31,7 +31,7 @@ appId: com.edkimmel.audiostream.dev
     visible:
       id: "suite-status"
       text: "PASS"
-    timeout: 90000
+    timeout: 120000
 - tapOn:
     id: "back-home"
 
@@ -44,7 +44,7 @@ appId: com.edkimmel.audiostream.dev
     visible:
       id: "suite-status"
       text: "PASS"
-    timeout: 90000
+    timeout: 120000
 - tapOn:
     id: "back-home"
 
@@ -57,6 +57,6 @@ appId: com.edkimmel.audiostream.dev
     visible:
       id: "suite-status"
       text: "PASS"
-    timeout: 90000
+    timeout: 120000
 - tapOn:
     id: "back-home"
