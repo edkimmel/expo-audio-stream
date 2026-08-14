@@ -1,14 +1,18 @@
 name: CI
 
+# Runs on PR open/update against ANY base branch (stacked PRs included),
+# plus direct pushes to main and claude/** working branches.
 on:
   push:
     branches: [main, "claude/**"]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
+# One run per commit: when a push and a pull_request event fire for the same
+# head SHA (branch with an open PR), the second run supersedes the first
+# instead of running the whole matrix twice.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
