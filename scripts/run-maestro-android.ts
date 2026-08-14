@@ -16,6 +16,7 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -197,10 +198,29 @@ function resolveAndroidHome(): string {
   fail("ANDROID_HOME is not set and no SDK was found.");
 }
 
+function cmdlineToolBins(androidHome: string): string[] {
+  const root = join(androidHome, "cmdline-tools");
+  const bins: string[] = [];
+  // Prefer `latest`, then any other installed cmdline-tools version
+  // (GitHub-hosted images sometimes ship `latest-2` / a versioned dir).
+  for (const name of ["latest", "latest-2"]) {
+    const dir = join(root, name, "bin");
+    if (existsSync(dir)) bins.push(dir);
+  }
+  if (existsSync(root)) {
+    for (const entry of readdirSync(root)) {
+      const dir = join(root, entry, "bin");
+      if (existsSync(dir) && !bins.includes(dir)) bins.push(dir);
+    }
+  }
+  const legacy = join(root, "bin");
+  if (existsSync(legacy)) bins.push(legacy);
+  return bins;
+}
+
 function prependSdkPath(androidHome: string): void {
   const extras = [
-    join(androidHome, "cmdline-tools/latest/bin"),
-    join(androidHome, "cmdline-tools/bin"),
+    ...cmdlineToolBins(androidHome),
     join(androidHome, "platform-tools"),
     join(androidHome, "emulator"),
   ].filter((dir) => existsSync(dir));
@@ -235,15 +255,20 @@ function acceptLicenses(): void {
   run("sdkmanager", ["--licenses"], { ignoreStatus: true, input: "y\n".repeat(40) });
 }
 
+function emulatorBinary(androidHome: string): string {
+  return join(androidHome, "emulator", "emulator");
+}
+
 function ensureSdkBits(androidHome: string, apiLevel: string): void {
   need("sdkmanager");
   need("avdmanager");
-  need("emulator");
   acceptLicenses();
 
   const pkgs: string[] = [];
-  if (!which("adb")) pkgs.push("platform-tools");
-  if (!existsSync(join(androidHome, "emulator", "emulator"))) {
+  if (!which("adb") && !existsSync(join(androidHome, "platform-tools", "adb"))) {
+    pkgs.push("platform-tools");
+  }
+  if (!existsSync(emulatorBinary(androidHome))) {
     pkgs.push("emulator");
   }
   if (!existsSync(join(androidHome, "platforms", `android-${apiLevel}`))) {
@@ -253,6 +278,11 @@ function ensureSdkBits(androidHome: string, apiLevel: string): void {
     console.log(`installing SDK packages: ${pkgs.join(" ")}`);
     run("sdkmanager", ["--install", ...pkgs], { stdio: "inherit" });
   }
+  // Newly installed emulator/platform-tools won't be on PATH until we
+  // re-scan ANDROID_HOME. Require the binaries only after that.
+  prependSdkPath(androidHome);
+  need("adb");
+  need("emulator");
 }
 
 function ensureSystemImage(
@@ -431,7 +461,6 @@ async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   const androidHome = resolveAndroidHome();
   prependSdkPath(androidHome);
-  need("adb");
   need("maestro");
 
   if (!existsSync(opts.flow)) fail(`Maestro flow not found: ${opts.flow}`);
