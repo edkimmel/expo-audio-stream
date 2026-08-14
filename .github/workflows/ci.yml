@@ -156,7 +156,7 @@ jobs:
       # The script creates the AVD (API 34, host ABI), boots it headless
       # (CI=true), installs the APK, and runs Maestro.
       - name: Run Maestro suites on emulator
-        run: bash scripts/run-maestro-android.sh
+        run: yarn e2e:android
 
       # Maestro writes into a hidden .maestro/ subdirectory, so hidden files
       # must be included or the artifact uploads empty.
