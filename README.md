@@ -1,6 +1,6 @@
 # @edkimmel/expo-audio-stream
 
-Native audio recording and low-latency playback for Expo/React Native. Designed for real-time voice AI applications: microphone capture, chunked PCM playback, and a jitter-buffered native pipeline for streaming audio from AI backends.
+Native audio recording and low-latency playback for Expo/React Native. Designed for real-time voice AI applications: microphone capture and a jitter-buffered native pipeline for streaming audio from AI backends.
 
 ## Install
 
@@ -36,34 +36,6 @@ const { recordingResult, subscription } =
 // Later:
 await ExpoPlayAudioStream.stopMicrophone();
 subscription?.remove();
-```
-
-### Chunked Playback (playSound)
-
-For playing base64-encoded PCM audio in a queue with turn management:
-
-```typescript
-import {
-  ExpoPlayAudioStream,
-  EncodingTypes,
-} from "@edkimmel/expo-audio-stream";
-
-await ExpoPlayAudioStream.setSoundConfig({
-  sampleRate: 24000,
-  playbackMode: "conversation",
-});
-
-// Enqueue chunks as they arrive
-await ExpoPlayAudioStream.playSound(
-  base64Chunk,
-  "turn-1",
-  EncodingTypes.PCM_S16LE
-);
-
-// Listen for playback completion
-const sub = ExpoPlayAudioStream.subscribeToSoundChunkPlayed(async (e) => {
-  if (e.isFinal) console.log("Turn finished playing");
-});
 ```
 
 ### Native Pipeline (recommended for AI voice streaming)
@@ -140,20 +112,11 @@ All methods are static.
 | `toggleSilence(isSilent)` | `void` | Mute/unmute the mic stream without stopping the session. Silenced frames are zero-filled. |
 | `promptMicrophoneModes()` | `void` | (iOS only) Show the system voice isolation picker (iOS 15+). |
 
-#### Sound Playback
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `playSound(audio, turnId, encoding?)` | `Promise<void>` | Enqueue a base64 PCM chunk for playback. |
-| `stopSound()` | `Promise<void>` | Stop playback and clear the queue. |
-| `setSoundConfig(config)` | `Promise<void>` | Update playback sample rate and mode. |
-
 #### Event Subscriptions
 
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `subscribeToAudioEvents(callback)` | `Subscription` | Receive `AudioDataEvent` during mic capture. |
-| `subscribeToSoundChunkPlayed(callback)` | `Subscription` | Notified when a chunk finishes playing. `isFinal` is true when the queue drains. |
 | `subscribe(eventName, callback)` | `Subscription` | Generic event listener for any module event. |
 
 ### Pipeline
@@ -207,16 +170,6 @@ interface RecordingConfig {
   interval?: number; // ms between audio data emissions (default 1000)
   onAudioStream?: (event: AudioDataEvent) => Promise<void>;
   frequencyBandConfig?: FrequencyBandConfig; // enable frequency band analysis on mic audio
-}
-```
-
-### SoundConfig
-
-```typescript
-interface SoundConfig {
-  sampleRate?: 16000 | 24000 | 44100 | 48000;
-  playbackMode?: "regular" | "voiceProcessing" | "conversation";
-  useDefault?: boolean; // reset to defaults
 }
 ```
 
@@ -281,8 +234,7 @@ interface FrequencyBands {
 | Event | Payload | Description |
 |-------|---------|-------------|
 | `AudioData` | `{ encoded, position, deltaSize, totalSize, soundLevel, frequencyBands?, ... }` | Emitted during mic capture at the configured interval. Includes `frequencyBands` when `frequencyBandConfig` is set. |
-| `SoundChunkPlayed` | `{ isFinal: boolean }` | A queued chunk finished playing. `isFinal` when the queue is empty. |
-| `SoundStarted` | (none) | Playback began for a new turn. |
+| `MicrophoneError` | `{ code, message, isFatal }` | Mid-recording error (session interruption, read failure). |
 | `DeviceReconnected` | `{ reason }` | Audio route changed (headphones, Bluetooth, etc). |
 
 ### Pipeline Events
@@ -303,10 +255,9 @@ interface FrequencyBands {
 
 ```typescript
 import {
-  EncodingTypes,           // { PCM_F32LE: "pcm_f32le", PCM_S16LE: "pcm_s16le" }
-  PlaybackModes,           // { REGULAR, VOICE_PROCESSING, CONVERSATION }
-  AudioEvents,             // { AudioData, SoundChunkPlayed, SoundStarted, DeviceReconnected }
-  SuspendSoundEventTurnId, // "suspend-sound-events" -- suppresses playback events
+  EncodingTypes, // { PCM_F32LE: "pcm_f32le", PCM_S16LE: "pcm_s16le" }
+  PlaybackModes, // { REGULAR, VOICE_PROCESSING, CONVERSATION }
+  AudioEvents,   // { AudioData, MicrophoneError, DeviceReconnected }
 } from "@edkimmel/expo-audio-stream";
 ```
 
@@ -314,17 +265,17 @@ import {
 
 ### iOS
 
-- Uses `AVAudioEngine` with `AVAudioPlayerNode` for sound playback and pipeline audio.
+- Uses `AVAudioEngine` with `AVAudioPlayerNode` for pipeline playback.
 - Microphone capture via `AVAudioEngine.inputNode` tap.
-- Audio session configured as `.playAndRecord` with `.voiceChat` mode.
+- Audio session configured as `.playAndRecord` with `.videoChat` mode.
 - Voice processing (AEC/noise reduction) available via `voiceProcessing` and `conversation` playback modes.
 - `promptMicrophoneModes()` exposes the iOS 15+ system voice isolation picker.
 
 ### Android
 
-- Uses `AudioTrack` (float PCM, `MODE_STREAM`) for sound playback.
-- Microphone capture via `AudioRecord` with `VOICE_RECOGNITION` source for far-field mic gain.
-- AEC, noise suppression, and AGC applied via `AudioEffectsManager`.
+- Uses `AudioTrack` (PCM 16-bit, `MODE_STREAM`, `USAGE_VOICE_COMMUNICATION`) for pipeline playback.
+- Microphone capture via `AudioRecord` with the `VOICE_COMMUNICATION` source so platform (HAL-level) echo cancellation applies.
+- `AcousticEchoCanceler` attached via `AudioEffectsManager` (noise suppression and AGC are available but off by default, deferring to the platform's HAL processing).
 
 ## License
 

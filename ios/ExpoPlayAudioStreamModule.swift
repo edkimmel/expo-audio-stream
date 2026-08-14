@@ -106,8 +106,20 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
             // Create recording settings
             // Extract settings from provided options, using default values if necessary
             let sampleRate = options["sampleRate"] as? Double ?? 16000.0
-            let numberOfChannels = options["channelConfig"] as? Int ?? 1
-            let bitDepth = options["audioFormat"] as? Int ?? 16
+            // The TS layer sends `channels` (number) and `encoding` (string, e.g.
+            // "pcm_16bit") — see RecordingConfig in src/types.ts. The old
+            // `channelConfig`/`audioFormat` integer keys are kept as fallbacks
+            // for callers invoking the native module directly.
+            let numberOfChannels = options["channels"] as? Int
+                ?? options["channelConfig"] as? Int
+                ?? 1
+            let bitDepth: Int
+            switch options["encoding"] as? String ?? "" {
+            case "pcm_8bit": bitDepth = 8
+            case "pcm_16bit": bitDepth = 16
+            case "pcm_32bit": bitDepth = 32
+            default: bitDepth = options["audioFormat"] as? Int ?? 16
+            }
             let interval = options["interval"] as? Int ?? 1000
 
             let fbConfigDict = options["frequencyBandConfig"] as? [String: Any]

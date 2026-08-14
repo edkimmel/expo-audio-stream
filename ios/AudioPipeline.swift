@@ -459,13 +459,13 @@ class AudioPipeline: SharedAudioEngineDelegate {
             return
         }
 
+        // PCM16 LE matches the in-memory sample layout on all Apple targets
+        // (little-endian), so a bulk copy replaces per-sample conversion. Any
+        // odd trailing byte is dropped, same as before.
         let sampleCount = bytes.count / 2
         var samples = [Int16](repeating: 0, count: sampleCount)
-        bytes.withUnsafeBytes { rawBuffer in
-            guard let ptr = rawBuffer.baseAddress?.assumingMemoryBound(to: Int16.self) else { return }
-            for i in 0..<sampleCount {
-                samples[i] = Int16(littleEndian: ptr[i])
-            }
+        samples.withUnsafeMutableBufferPointer { dest in
+            _ = bytes.copyBytes(to: dest)
         }
 
         // ── Write into jitter buffer ────────────────────────────────────
