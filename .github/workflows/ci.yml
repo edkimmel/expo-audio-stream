@@ -273,3 +273,154 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO \
             | tail -n 200
+
+  ios-e2e:
+    name: iOS e2e (Maestro)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Maestro is a JVM CLI; pin a known JDK rather than the image default.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Enable corepack (Yarn 4)
+        run: corepack enable
+
+      - name: Install module dependencies
+        run: yarn install --immutable
+
+      # app.plugin.js requires ./plugin/build, which this generates. npm runs
+      # the root `prepare` script on install; Yarn 4 does not, so CI builds it
+      # explicitly.
+      - name: Build config plugin
+        run: npx expo-module build plugin
+
+      - name: Install example dependencies
+        working-directory: example
+        run: yarn install --immutable
+
+      - name: Prebuild iOS project
+        working-directory: example
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            example/ios/Pods
+          key: cocoapods-${{ runner.os }}-${{ hashFiles('example/yarn.lock', 'example/ios/Podfile') }}
+
+      - name: Install CocoaPods
+        working-directory: example
+        run: npx pod-install ios
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: example/ios/DerivedData
+          key: ios-dd-release-${{ runner.os }}-${{ hashFiles('example/yarn.lock', 'example/ios/Podfile.lock', 'src/**', 'ios/**', 'plugin/src/**', 'example/App.tsx', 'example/screens/**', 'example/testkit/**', 'example/app.json') }}
+
+      - name: Cache Maestro CLI
+        uses: actions/cache@v4
+        id: maestro-cache
+        with:
+          path: ~/.maestro
+          key: maestro-${{ runner.os }}-v1
+
+      - name: Install Maestro
+        if: steps.maestro-cache.outputs.cache-hit != 'true'
+        run: curl -Ls "https://get.maestro.mobile.dev" | bash
+
+      - name: Add Maestro to PATH
+        run: echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      # Release embeds main.jsbundle (Debug skips bundling and needs Metro).
+      # generic/platform=iOS Simulator produces an installable sim .app without
+      # pinning a device name that may not exist on the image.
+      - name: Build release simulator app
+        working-directory: example/ios
+        run: |
+          set -o pipefail
+          WORKSPACE=$(ls -d *.xcworkspace | head -n1)
+          SCHEME="${WORKSPACE%.xcworkspace}"
+          echo "Building workspace=$WORKSPACE scheme=$SCHEME"
+          xcodebuild build \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            | tail -n 80
+
+      - name: Boot iOS Simulator
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+
+          data = json.loads(
+              subprocess.check_output(
+                  ["xcrun", "simctl", "list", "devices", "available", "-j"]
+              )
+          )
+          preferred = [
+              "iPhone 16",
+              "iPhone 16e",
+              "iPhone 17",
+              "iPhone 15",
+              "iPhone 16 Pro",
+              "iPhone 17 Pro",
+          ]
+          devices = []
+          for runtime, listed in data.get("devices", {}).items():
+              for device in listed:
+                  if device.get("isAvailable") is False:
+                      continue
+                  device = dict(device)
+                  device["runtime"] = runtime
+                  devices.append(device)
+                  print(f"  {device.get('name')}  {runtime}  {device.get('udid')}")
+
+          picked = None
+          for name in preferred:
+              picked = next((d for d in devices if d.get("name") == name), None)
+              if picked:
+                  break
+          if picked is None:
+              picked = next(
+                  (d for d in devices if str(d.get("name", "")).startswith("iPhone")),
+                  None,
+              )
+          if picked is None:
+              sys.exit("no available iPhone simulator on this runner")
+
+          udid = picked["udid"]
+          print(f"Booting {picked['name']} ({udid})")
+          subprocess.run(["xcrun", "simctl", "boot", udid], check=False)
+          subprocess.check_call(["xcrun", "simctl", "bootstatus", udid, "-b"])
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf8") as fh:
+              fh.write(f"SIM_UDID={udid}\n")
+          PY
+
+      - name: Run Maestro suites on simulator
+        run: yarn e2e:ios -- --skip-sim --headless --sim-udid "$SIM_UDID"
+
+      - name: Upload Maestro debug output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-debug-ios
+          path: maestro-debug
+          include-hidden-files: true
