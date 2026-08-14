@@ -192,10 +192,9 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
             return@Function result
         }
 
-        AsyncFunction("pushPipelineAudioBinary") { audio: Uint8Array, turnId: String, isFirstChunk: Boolean, isLastChunk: Boolean, promise: Promise ->
-            pipelineIntegration.pushAudioBinary(audio, turnId, isFirstChunk, isLastChunk, promise)
-        }
-
+        // Binary push is sync-only by design: typed-array access is only
+        // guaranteed safe on the JS thread, where synchronous Functions run.
+        // The TS layer wraps this for the async Pipeline.pushAudio API.
         Function("pushPipelineAudioBinarySync") { audio: Uint8Array, turnId: String, isFirstChunk: Boolean, isLastChunk: Boolean ->
             val result: Boolean = pipelineIntegration.pushAudioBinarySync(audio, turnId, isFirstChunk, isLastChunk)
             return@Function result

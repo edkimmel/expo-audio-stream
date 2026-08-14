@@ -201,30 +201,15 @@ class PipelineIntegration(
     }
 
     /**
-     * Binary twin of [pushAudio]: raw PCM16 LE bytes, no base64. The typed
-     * array's memory is backed by the JS ArrayBuffer, so it is copied to a
-     * ByteArray here — inside the bridge call — before being handed to the
-     * pipeline.
+     * Binary twin of [pushAudioSync]: raw PCM16 LE bytes, no base64.
+     * Returns false on any failure.
+     *
+     * This is a synchronous Function on purpose — it runs on the JS thread,
+     * the only place typed-array access is guaranteed safe. The copy uses
+     * TypedArray.read(), which goes through a pointer cached at construction
+     * (already adjusted for the view's byteOffset) rather than
+     * toDirectBuffer(), which re-enters the JS runtime.
      */
-    fun pushAudioBinary(
-        audio: Uint8Array,
-        turnId: String,
-        isFirstChunk: Boolean,
-        isLastChunk: Boolean,
-        promise: expo.modules.kotlin.Promise
-    ) {
-        try {
-            val p = pipeline
-                ?: throw IllegalStateException("Pipeline not connected")
-            p.pushAudio(typedArrayToBytes(audio), turnId, isFirstChunk, isLastChunk)
-            promise.resolve(null)
-        } catch (e: Exception) {
-            Log.e(TAG, "pushAudioBinary failed", e)
-            promise.reject("PIPELINE_PUSH_ERROR", e.message ?: "Unknown error", e)
-        }
-    }
-
-    /** Binary twin of [pushAudioSync]. Returns false on any failure. */
     fun pushAudioBinarySync(
         audio: Uint8Array,
         turnId: String,
@@ -233,18 +218,14 @@ class PipelineIntegration(
     ): Boolean {
         return try {
             val p = pipeline ?: return false
-            p.pushAudio(typedArrayToBytes(audio), turnId, isFirstChunk, isLastChunk)
+            val bytes = ByteArray(audio.byteLength)
+            audio.read(bytes, 0, audio.byteLength)
+            p.pushAudio(bytes, turnId, isFirstChunk, isLastChunk)
             true
         } catch (e: Exception) {
             Log.e(TAG, "pushAudioBinarySync failed", e)
             false
         }
-    }
-
-    private fun typedArrayToBytes(audio: Uint8Array): ByteArray {
-        val bytes = ByteArray(audio.byteLength)
-        audio.toDirectBuffer().get(bytes)
-        return bytes
     }
 
     /**

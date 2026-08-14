@@ -65,12 +65,22 @@ export class Pipeline {
    */
   static async pushAudio(options: PushPipelineAudioOptions): Promise<void> {
     if (options.audio instanceof Uint8Array) {
-      return await ExpoPlayAudioStreamModule.pushPipelineAudioBinary(
+      // Binary audio always goes through the synchronous native function:
+      // typed-array memory is only safely readable on the JS thread, which
+      // is where sync calls execute. An async native variant would touch the
+      // JS runtime from the module queue.
+      const ok = ExpoPlayAudioStreamModule.pushPipelineAudioBinarySync(
         options.audio,
         options.turnId,
         options.isFirstChunk ?? false,
         options.isLastChunk ?? false
       );
+      if (!ok) {
+        throw new Error(
+          "PIPELINE_PUSH_ERROR: binary push failed (is the pipeline connected? see PipelineError events)"
+        );
+      }
+      return;
     }
     return await ExpoPlayAudioStreamModule.pushPipelineAudio(options);
   }

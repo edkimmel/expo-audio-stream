@@ -6,7 +6,6 @@
 const mockNativeModule: Record<string, jest.Mock> = {
   pushPipelineAudio: jest.fn(async () => undefined),
   pushPipelineAudioSync: jest.fn(() => true),
-  pushPipelineAudioBinary: jest.fn(async () => undefined),
   pushPipelineAudioBinarySync: jest.fn(() => true),
   connectPipeline: jest.fn(async () => ({})),
   disconnectPipeline: jest.fn(async () => undefined),
@@ -81,9 +80,11 @@ describe("Pipeline.pushAudioSync", () => {
 describe("binary (Uint8Array) push dispatch", () => {
   const bytes = new Uint8Array([1, 0, 2, 0, 3, 0]);
 
-  it("pushAudio routes Uint8Array to the binary native function with positional args", async () => {
+  it("pushAudio routes Uint8Array to the SYNC binary native function", async () => {
+    // Binary is sync-only at the native layer: typed-array memory is only
+    // safely readable on the JS thread. The async JS API wraps the sync call.
     await Pipeline.pushAudio({ audio: bytes, turnId: "t1" });
-    expect(mockNativeModule.pushPipelineAudioBinary).toHaveBeenCalledWith(
+    expect(mockNativeModule.pushPipelineAudioBinarySync).toHaveBeenCalledWith(
       bytes,
       "t1",
       false,
@@ -113,7 +114,7 @@ describe("binary (Uint8Array) push dispatch", () => {
       isFirstChunk: true,
       isLastChunk: true,
     });
-    expect(mockNativeModule.pushPipelineAudioBinary).toHaveBeenCalledWith(
+    expect(mockNativeModule.pushPipelineAudioBinarySync).toHaveBeenCalledWith(
       bytes,
       "t2",
       true,
@@ -133,16 +134,13 @@ describe("binary (Uint8Array) push dispatch", () => {
   it("string audio still uses the legacy base64 functions", async () => {
     await Pipeline.pushAudio({ audio: "QUJD", turnId: "t1" });
     Pipeline.pushAudioSync({ audio: "QUJD", turnId: "t1" });
-    expect(mockNativeModule.pushPipelineAudioBinary).not.toHaveBeenCalled();
     expect(mockNativeModule.pushPipelineAudioBinarySync).not.toHaveBeenCalled();
     expect(mockNativeModule.pushPipelineAudio).toHaveBeenCalledTimes(1);
     expect(mockNativeModule.pushPipelineAudioSync).toHaveBeenCalledTimes(1);
   });
 
-  it("propagates rejection from the binary native function", async () => {
-    mockNativeModule.pushPipelineAudioBinary.mockRejectedValueOnce(
-      new Error("PIPELINE_PUSH_ERROR")
-    );
+  it("pushAudio rejects when the sync binary push fails", async () => {
+    mockNativeModule.pushPipelineAudioBinarySync.mockReturnValueOnce(false);
     await expect(
       Pipeline.pushAudio({ audio: bytes, turnId: "t1" })
     ).rejects.toThrow("PIPELINE_PUSH_ERROR");

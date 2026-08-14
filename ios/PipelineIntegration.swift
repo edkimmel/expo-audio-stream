@@ -125,17 +125,9 @@ class PipelineIntegration: PipelineListener {
         return true
     }
 
-    /// Binary twin of `pushAudio`: raw PCM16 LE bytes, no base64. The caller
-    /// (module layer) has already copied the JS typed array into `Data`.
-    func pushAudioBinary(bytes: Data, turnId: String, isFirstChunk: Bool, isLastChunk: Bool) throws {
-        guard let p = pipeline else {
-            throw NSError(domain: "PipelineIntegration", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Pipeline not connected"])
-        }
-        p.pushAudio(bytes: bytes, turnId: turnId, isFirstChunk: isFirstChunk, isLastChunk: isLastChunk)
-    }
-
-    /// Binary twin of `pushAudioSync`. Returns false on any failure.
+    /// Binary twin of `pushAudioSync`: raw PCM16 LE bytes, no base64. The
+    /// caller (module layer) has already copied the JS typed array into
+    /// `Data`. Returns false on any failure.
     func pushAudioBinarySync(bytes: Data, turnId: String, isFirstChunk: Bool, isLastChunk: Bool) -> Bool {
         guard let p = pipeline else { return false }
         p.pushAudio(bytes: bytes, turnId: turnId, isFirstChunk: isFirstChunk, isLastChunk: isLastChunk)
