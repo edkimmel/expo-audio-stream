@@ -314,19 +314,22 @@ special-casing — keeps packet cadence and decoder state continuous.
 
 ## 5. Known defects to fix alongside (pre-existing, low risk)
 
+> **Status: DONE** — merged to `main` in `90426b0` (verified on iOS in the
+> example app). Kept here for the record.
+
 These touch the same files and should land first (Phase 0):
 
-1. **iOS mic config key mismatch.** iOS reads `options["channelConfig"]` /
-   `options["audioFormat"]` (`ios/ExpoPlayAudioStreamModule.swift:109-110`)
-   but the TS layer sends `channels` / `encoding` (`src/types.ts:124-125`) —
-   so those fields are silently ignored on iOS today. Read the correct keys
-   (keep reading legacy keys as fallback, per rule 1's spirit).
-2. **iOS per-sample byte→Int16 loop** (`ios/AudioPipeline.swift:464-469`) →
-   bulk copy (§3.1).
-3. **Stale docs.** README still documents the deleted `playSound` path
-   (README.md:41-70, 147-149, 317) and misstates the Android track as
-   "float PCM" (README.md:328 — it is `ENCODING_PCM_16BIT`,
-   `AudioPipeline.kt:273-277`).
+1. **iOS mic config key mismatch.** iOS read `options["channelConfig"]` /
+   `options["audioFormat"]` but the TS layer sends `channels` / `encoding`
+   (`src/types.ts:124-125`) — so those fields were silently ignored on iOS.
+   Fixed: correct keys read first, legacy keys kept as fallback.
+2. **iOS per-sample byte→Int16 loop** in the pipeline push → bulk
+   `Data.copyBytes` (also removed an unaligned `assumingMemoryBound`).
+3. **Stale docs.** README documented the deleted `playSound` path and
+   misstated the Android track as "float PCM". Two additional stale claims
+   found and fixed during implementation: iOS session mode is `.videoChat`
+   (README said `.voiceChat`), and the Android mic source is
+   `VOICE_COMMUNICATION` (README said `VOICE_RECOGNITION`).
 
 ---
 
@@ -336,7 +339,7 @@ Each phase is independently shippable and independently revertible.
 
 | Phase | Scope | Files (primary) |
 |---|---|---|
-| **0** | Defect fixes above; no behavior change for correct configs | `ios/ExpoPlayAudioStreamModule.swift`, `ios/AudioPipeline.swift`, `README.md` |
+| **0** ✅ | Defect fixes above (merged in `90426b0`) | `ios/ExpoPlayAudioStreamModule.swift`, `ios/AudioPipeline.swift`, `README.md` |
 | **1** | Binary PCM pipeline push: new `pushPipelineAudioBinary(Sync)` natives, TS dispatch on `Uint8Array` | `src/pipeline/index.ts`, `src/pipeline/types.ts`, `ios/ExpoPlayAudioStreamModule.swift`, `ios/PipelineIntegration.swift`, `ios/AudioPipeline.swift`, `ExpoPlayAudioStreamModule.kt`, `PipelineIntegration.kt`, `AudioPipeline.kt` |
 | **2** | Binary PCM mic events: `binaryData` flag, `bytes` payload key, Android version gate | `src/types.ts`, `src/events.ts`, `src/index.ts`, `ios/ExpoPlayAudioStreamModule.swift`, `ios/RecordingSettings.swift`, `AudioRecorderManager.kt`, `RecordingConfig.kt` |
 | **3** | libopus vendoring + Pipeline Opus decode (`codec` connect option, batch framing) | `ios/ExpoPlayAudioStream.podspec`, `android/build.gradle` (+CMake), new `OpusCodec.swift` / `OpusCodec.kt`, `AudioPipeline.swift/kt`, `src/pipeline/types.ts` |
@@ -370,6 +373,47 @@ its Opus counterpart depends on.
 - **Latency/perf spot checks:** telemetry (`getTelemetry`) before/after on a
   50 pushes/sec single-packet stream; mic event cadence at
   `interval: 40/60/100` with Opus.
+
+### 7.1 Phase 1 test plan (binary PCM pipeline push)
+
+There is no automated test infrastructure in this repo, so Phase 1
+verification is example-app driven on both platforms. JS-side equivalence
+checks use `Pipeline.getTelemetry()` as the observable.
+
+**Regression (must be unchanged):**
+1. String/base64 push of a known PCM stream plays identically to pre-P1
+   (`pushAudio` and `pushAudioSync`); telemetry push counts/bytes match.
+
+**Binary equivalence:**
+2. Generate a deterministic PCM16 fixture in JS (e.g. 2 s of 440 Hz sine at
+   the pipeline sample rate). Push it once as base64 and once as
+   `Uint8Array` in separate sessions: audible output identical,
+   `totalPushBytes` identical, zero underruns on both.
+
+**Edge cases (binary path):**
+3. Empty `Uint8Array` (0 bytes) — no crash, no state change.
+4. Odd byte length — trailing byte dropped, matching base64-path behavior.
+5. `Uint8Array` **subarray view** with non-zero `byteOffset` — output must
+   match the equivalent fresh copy (guards against typed-array offset
+   mishandling in the bridge marshalling).
+6. Buffer reuse: push, then immediately overwrite the same `Uint8Array` in
+   JS and push again — first push's audio must not be corrupted (verifies
+   the native copy-before-return invariant).
+7. Large chunk (≥ 1 MB) and rapid small chunks (50/sec for 30 s) — no
+   dropouts, telemetry consistent.
+
+**Turn/lifecycle on the binary path:**
+8. `isFirstChunk` resets the jitter buffer; `invalidateTurn` mid-stream
+   discards buffered audio; `isLastChunk` drains → `PipelineDrained` fires.
+9. Push before `connect` → async variant rejects/errors `NOT_CONNECTED`,
+   sync variant returns `false`.
+10. Mixed-mode stream: alternate base64 and binary pushes within one turn —
+    output continuous (both paths feed the same jitter buffer).
+
+**Perf spot check:**
+11. `console.time` around 1000 sync pushes of a 20 ms chunk, base64 vs
+    binary — binary should be measurably cheaper on the JS thread; record
+    numbers in the PR/commit for the record.
 
 ---
 
