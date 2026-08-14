@@ -1,0 +1,62 @@
+# Runs every on-device test suite in the example app and asserts PASS.
+# Suite UI contract (testIDs) is defined in example/App.tsx and
+# example/screens/SuiteScreen.tsx.
+appId: com.edkimmel.audiostream.dev
+---
+- launchApp:
+    permissions:
+      all: allow
+
+- assertVisible: "expo-audio-stream test suites"
+
+# ── Pipeline PCM (base64) ──────────────────────────────────────────────
+- tapOn:
+    id: "suite-link-pipeline-base64"
+- tapOn:
+    id: "run-suite"
+- extendedWaitUntil:
+    visible:
+      id: "suite-status"
+      text: "PASS"
+    timeout: 90000
+- tapOn:
+    id: "back-home"
+
+# ── Pipeline PCM (binary) ──────────────────────────────────────────────
+- tapOn:
+    id: "suite-link-pipeline-binary"
+- tapOn:
+    id: "run-suite"
+- extendedWaitUntil:
+    visible:
+      id: "suite-status"
+      text: "PASS"
+    timeout: 90000
+- tapOn:
+    id: "back-home"
+
+# ── Pipeline edge cases ────────────────────────────────────────────────
+- tapOn:
+    id: "suite-link-pipeline-edge"
+- tapOn:
+    id: "run-suite"
+- extendedWaitUntil:
+    visible:
+      id: "suite-status"
+      text: "PASS"
+    timeout: 90000
+- tapOn:
+    id: "back-home"
+
+# ── Microphone capture ─────────────────────────────────────────────────
+- tapOn:
+    id: "suite-link-mic-capture"
+- tapOn:
+    id: "run-suite"
+- extendedWaitUntil:
+    visible:
+      id: "suite-status"
+      text: "PASS"
+    timeout: 90000
+- tapOn:
+    id: "back-home"
