@@ -140,15 +140,25 @@ jobs:
         working-directory: example/android
         run: ./gradlew assembleRelease
 
+      - name: Cache Maestro CLI
+        uses: actions/cache@v4
+        id: maestro-cache
+        with:
+          path: ~/.maestro
+          key: maestro-${{ runner.os }}-v1
+
       - name: Install Maestro
-        run: |
-          curl -Ls "https://get.maestro.mobile.dev" | bash
-          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+        if: steps.maestro-cache.outputs.cache-hit != 'true'
+        run: curl -Ls "https://get.maestro.mobile.dev" | bash
+
+      - name: Add Maestro to PATH
+        run: echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
 
       # The emulator needs a host audio server or its virtual audio device
       # never consumes frames — AudioTrack writes then block forever and the
       # pipeline never drains (run #4 failed exactly this way: "pulseaudio:
-      # Failed to initialize PA context").
+      # Failed to initialize PA context"). Do not pass -noaudio to the
+      # emulator; the default runner flags include it.
       - name: Start PulseAudio (emulator audio backend)
         run: |
           sudo apt-get update -qq
@@ -156,10 +166,44 @@ jobs:
           pulseaudio --start --exit-idle-time=-1
           pactl info
 
-      # The script creates the AVD (API 34, host ABI), boots it headless
-      # (CI=true), installs the APK, and runs Maestro.
+      # Official android-emulator-runner snapshot cache: first miss creates
+      # the AVD + a clean boot snapshot; later runs load it in seconds.
+      # Cache the system image too so a miss does not re-download ~1GB.
+      - name: Cache AVD and system image
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+            ${{ env.ANDROID_HOME }}/system-images
+            ${{ env.ANDROID_HOME }}/emulator
+          key: avd-34-default-x86_64-audio-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          avd-name: expo-audio-e2e
+          force-avd-creation: false
+          disable-animations: false
+          emulator-options: -no-window -gpu swiftshader_indirect -no-boot-anim -camera-back none
+          script: echo "Generated AVD snapshot for caching."
+
       - name: Run Maestro suites on emulator
-        run: yarn e2e:android
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          avd-name: expo-audio-e2e
+          force-avd-creation: false
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -no-boot-anim -camera-back none
+          script: yarn e2e:android -- --skip-avd
 
       # Maestro writes into a hidden .maestro/ subdirectory, so hidden files
       # must be included or the artifact uploads empty.

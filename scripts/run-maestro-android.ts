@@ -9,6 +9,7 @@
  *   yarn e2e:android
  *   yarn e2e:android -- --skip-install
  *   yarn e2e:android -- --keep-emulator   # leave the AVD up after the run
+ *   yarn e2e:android -- --skip-avd        # device already attached (CI)
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -34,6 +35,7 @@ type Options = {
   apiLevel: string;
   bootTimeoutSec: number;
   skipInstall: boolean;
+  skipAvd: boolean;
   forceAvd: boolean;
   keepEmulator: boolean;
   headless: boolean;
@@ -54,6 +56,7 @@ Typical local loop:
 
 Flags:
   --skip-install     assume the app is already installed
+  --skip-avd         do not create/boot/stop an AVD; require a device on adb
   --force-avd        delete and recreate the e2e AVD
   --headless         no emulator window (also on when CI=true)
   --keep-emulator    leave the AVD running after the script exits
@@ -75,6 +78,7 @@ function parseArgs(argv: string[]): Options {
     apiLevel: process.env.API_LEVEL ?? "34",
     bootTimeoutSec: Number(process.env.BOOT_TIMEOUT ?? 600),
     skipInstall: false,
+    skipAvd: false,
     forceAvd: false,
     keepEmulator: false,
     headless: process.env.CI === "true" || process.env.E2E_HEADLESS === "1",
@@ -90,6 +94,9 @@ function parseArgs(argv: string[]): Options {
     switch (arg) {
       case "--skip-install":
         opts.skipInstall = true;
+        break;
+      case "--skip-avd":
+        opts.skipAvd = true;
         break;
       case "--force-avd":
         opts.forceAvd = true;
@@ -459,35 +466,47 @@ function dumpLogcat(): void {
 
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
-  const androidHome = resolveAndroidHome();
-  prependSdkPath(androidHome);
+  prependSdkPath(resolveAndroidHome());
+  need("adb");
   need("maestro");
 
   if (!existsSync(opts.flow)) fail(`Maestro flow not found: ${opts.flow}`);
 
-  const abi = hostAbi();
-  const target = selectTarget(androidHome, opts.apiLevel, abi);
-  ensureSdkBits(androidHome, opts.apiLevel);
-  const pkg = ensureSystemImage(androidHome, opts.apiLevel, target, abi);
-  ensureAvd(opts, pkg);
-
   let emulator: ChildProcess | undefined;
-  const startedEmulator = !deviceOnline();
-  const cleanup = () => stopE2eAvd(opts, emulator);
-  process.on("exit", cleanup);
-  process.on("SIGINT", () => process.exit(130));
-  process.on("SIGTERM", () => process.exit(143));
-
-  if (startedEmulator) {
-    emulator = startEmulator(opts);
-    await waitForBoot(opts.bootTimeoutSec);
-    disableAnimations();
-  } else {
+  if (opts.skipAvd) {
+    if (!deviceOnline()) {
+      fail("--skip-avd requires an already-attached device (`adb devices`)");
+    }
     const serial = run("adb", ["get-serialno"], { ignoreStatus: true }).stdout.trim();
     const avd = attachedAvdName();
     console.log(
       `using already-attached device (${serial || "unknown"}${avd ? `, avd=${avd}` : ""})`
     );
+  } else {
+    const androidHome = resolveAndroidHome();
+    prependSdkPath(androidHome);
+    const abi = hostAbi();
+    const target = selectTarget(androidHome, opts.apiLevel, abi);
+    ensureSdkBits(androidHome, opts.apiLevel);
+    const pkg = ensureSystemImage(androidHome, opts.apiLevel, target, abi);
+    ensureAvd(opts, pkg);
+
+    const startedEmulator = !deviceOnline();
+    process.on("exit", () => stopE2eAvd(opts, emulator));
+    process.on("SIGINT", () => process.exit(130));
+    process.on("SIGTERM", () => process.exit(143));
+
+    if (startedEmulator) {
+      emulator = startEmulator(opts);
+      await waitForBoot(opts.bootTimeoutSec);
+      disableAnimations();
+    } else {
+      const serial = run("adb", ["get-serialno"], { ignoreStatus: true }).stdout.trim();
+      const avd = attachedAvdName();
+      console.log(
+        `using already-attached device (${serial || "unknown"}${avd ? `, avd=${avd}` : ""})`
+      );
+    }
   }
 
   if (!opts.skipInstall) {
