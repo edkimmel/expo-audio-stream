@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   typescript:
-    name: TypeScript build
+    name: TypeScript build & tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -29,8 +29,14 @@ jobs:
       - name: Install dependencies
         run: yarn install --immutable
 
-      - name: Build module (tsc via expo-module-scripts)
+      - name: Build module (tsc)
         run: yarn build
+
+      - name: Build config plugin
+        run: npx expo-module build plugin
+
+      - name: Run unit tests (jest)
+        run: yarn test
 
   android:
     name: Android build (example app)
@@ -58,6 +64,12 @@ jobs:
       - name: Install module dependencies
         run: yarn install --immutable
 
+      # app.plugin.js requires ./plugin/build, which this generates. npm runs
+      # the root `prepare` script on install; Yarn 4 does not, so CI builds it
+      # explicitly.
+      - name: Build config plugin
+        run: npx expo-module build plugin
+
       - name: Install example dependencies
         working-directory: example
         run: yarn install --immutable
@@ -65,6 +77,10 @@ jobs:
       - name: Prebuild Android project
         working-directory: example
         run: npx expo prebuild --platform android --no-install
+
+      - name: Kotlin unit tests (module)
+        working-directory: example/android
+        run: ./gradlew testDebugUnitTest
 
       - name: Compile Android app + module
         working-directory: example/android
@@ -84,8 +100,22 @@ jobs:
       - name: Enable corepack (Yarn 4)
         run: corepack enable
 
+      # Fast native-logic signal before the expensive app build: JitterBuffer
+      # is dependency-free Swift, compiled and run directly.
+      - name: Swift unit tests (JitterBuffer)
+        run: |
+          swiftc -parse-as-library -o /tmp/jitterbuffer-tests \
+            ios/JitterBuffer.swift tests/ios/JitterBufferTests.swift
+          /tmp/jitterbuffer-tests
+
       - name: Install module dependencies
         run: yarn install --immutable
+
+      # app.plugin.js requires ./plugin/build, which this generates. npm runs
+      # the root `prepare` script on install; Yarn 4 does not, so CI builds it
+      # explicitly.
+      - name: Build config plugin
+        run: npx expo-module build plugin
 
       - name: Install example dependencies
         working-directory: example
