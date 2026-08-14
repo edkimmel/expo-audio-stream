@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import expo.modules.audiostream.EventSender
+import expo.modules.kotlin.typedarray.Uint8Array
 
 /**
  * Bridge layer wiring [AudioPipeline] into the existing ExpoPlayAudioStreamModule.
@@ -195,6 +196,34 @@ class PipelineIntegration(
             true
         } catch (e: Exception) {
             Log.e(TAG, "pushAudioSync failed", e)
+            false
+        }
+    }
+
+    /**
+     * Binary twin of [pushAudioSync]: raw PCM16 LE bytes, no base64.
+     * Returns false on any failure.
+     *
+     * This is a synchronous Function on purpose — it runs on the JS thread,
+     * the only place typed-array access is guaranteed safe. The copy uses
+     * TypedArray.read(), which goes through a pointer cached at construction
+     * (already adjusted for the view's byteOffset) rather than
+     * toDirectBuffer(), which re-enters the JS runtime.
+     */
+    fun pushAudioBinarySync(
+        audio: Uint8Array,
+        turnId: String,
+        isFirstChunk: Boolean,
+        isLastChunk: Boolean
+    ): Boolean {
+        return try {
+            val p = pipeline ?: return false
+            val bytes = ByteArray(audio.byteLength)
+            audio.read(bytes, 0, audio.byteLength)
+            p.pushAudio(bytes, turnId, isFirstChunk, isLastChunk)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "pushAudioBinarySync failed", e)
             false
         }
     }

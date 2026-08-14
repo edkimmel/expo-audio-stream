@@ -280,6 +280,16 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
             return self.pipelineIntegration.pushAudioSync(options: options)
         }
 
+        // Binary push is sync-only by design: TypedArray's lazy accessors
+        // (rawPointer/byteLength) re-enter the JS runtime, which is only safe
+        // on the JS thread — where synchronous Functions run. The TS layer
+        // wraps this for the async Pipeline.pushAudio API.
+        Function("pushPipelineAudioBinarySync") { (audio: Uint8Array, turnId: String, isFirstChunk: Bool, isLastChunk: Bool) -> Bool in
+            // Copy out of the JS-owned ArrayBuffer before the call returns.
+            let bytes = Data(bytes: audio.rawPointer, count: audio.byteLength)
+            return self.pipelineIntegration.pushAudioBinarySync(bytes: bytes, turnId: turnId, isFirstChunk: isFirstChunk, isLastChunk: isLastChunk)
+        }
+
         AsyncFunction("disconnectPipeline") { (promise: Promise) in
             self.pipelineIntegration.removeAsDelegate(from: self.sharedAudioEngine)
             self.pipelineIntegration.disconnect()

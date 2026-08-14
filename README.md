@@ -65,10 +65,12 @@ const focusSub = Pipeline.onAudioFocus(({ focused }) => {
   }
 });
 
-// Hot path: push audio synchronously from WebSocket handler
+// Hot path: push audio synchronously from WebSocket handler.
+// Prefer binary frames — no base64 round-trip on either side.
+ws.binaryType = "arraybuffer";
 ws.onmessage = (msg) => {
   Pipeline.pushAudioSync({
-    audio: msg.data, // base64 PCM16 LE
+    audio: new Uint8Array(msg.data), // raw PCM16 LE (base64 string also accepted)
     turnId: currentTurnId,
     isFirstChunk: isFirst,
     isLastChunk: isLast,
@@ -134,7 +136,7 @@ All methods are static. The pipeline manages its own native write thread, jitter
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `pushAudio(options)` | `Promise<void>` | Push base64 PCM16 LE audio (async, with error propagation). |
+| `pushAudio(options)` | `Promise<void>` | Push PCM16 LE audio — base64 string or raw `Uint8Array` (async, with error propagation). |
 | `pushAudioSync(options)` | `boolean` | Push audio synchronously. No Promise overhead -- use in WebSocket `onmessage` for minimum latency. Returns `false` on failure. |
 
 #### Turn Management
@@ -201,12 +203,16 @@ Controls how pipeline playback coexists with audio from other apps on the device
 
 ```typescript
 interface PushPipelineAudioOptions {
-  audio: string;           // base64-encoded PCM 16-bit signed LE
+  audio: string | Uint8Array; // PCM 16-bit signed LE: base64 string, or raw bytes (no base64 round-trip)
   turnId: string;
-  isFirstChunk?: boolean;  // resets jitter buffer
-  isLastChunk?: boolean;   // marks end-of-stream, begins drain
+  isFirstChunk?: boolean;     // resets jitter buffer
+  isLastChunk?: boolean;      // marks end-of-stream, begins drain
 }
 ```
+
+When `audio` is a `Uint8Array`, the bytes are copied natively during the call,
+so the buffer (e.g. a reused WebSocket receive buffer) may be written to again
+as soon as the call returns.
 
 ### FrequencyBandConfig
 

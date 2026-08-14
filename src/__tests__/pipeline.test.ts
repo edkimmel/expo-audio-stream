@@ -6,6 +6,7 @@
 const mockNativeModule: Record<string, jest.Mock> = {
   pushPipelineAudio: jest.fn(async () => undefined),
   pushPipelineAudioSync: jest.fn(() => true),
+  pushPipelineAudioBinarySync: jest.fn(() => true),
   connectPipeline: jest.fn(async () => ({})),
   disconnectPipeline: jest.fn(async () => undefined),
   invalidatePipelineTurn: jest.fn(async () => undefined),
@@ -73,6 +74,76 @@ describe("Pipeline.pushAudioSync", () => {
 
     mockNativeModule.pushPipelineAudioSync.mockReturnValueOnce(false);
     expect(Pipeline.pushAudioSync({ audio: "QUJD", turnId: "t1" })).toBe(false);
+  });
+});
+
+describe("binary (Uint8Array) push dispatch", () => {
+  const bytes = new Uint8Array([1, 0, 2, 0, 3, 0]);
+
+  it("pushAudio routes Uint8Array to the SYNC binary native function", async () => {
+    // Binary is sync-only at the native layer: typed-array memory is only
+    // safely readable on the JS thread. The async JS API wraps the sync call.
+    await Pipeline.pushAudio({ audio: bytes, turnId: "t1" });
+    expect(mockNativeModule.pushPipelineAudioBinarySync).toHaveBeenCalledWith(
+      bytes,
+      "t1",
+      false,
+      false
+    );
+    expect(mockNativeModule.pushPipelineAudio).not.toHaveBeenCalled();
+  });
+
+  it("pushAudioSync routes Uint8Array to the binary sync function and returns its result", () => {
+    expect(Pipeline.pushAudioSync({ audio: bytes, turnId: "t1" })).toBe(true);
+    expect(mockNativeModule.pushPipelineAudioBinarySync).toHaveBeenCalledWith(
+      bytes,
+      "t1",
+      false,
+      false
+    );
+    expect(mockNativeModule.pushPipelineAudioSync).not.toHaveBeenCalled();
+
+    mockNativeModule.pushPipelineAudioBinarySync.mockReturnValueOnce(false);
+    expect(Pipeline.pushAudioSync({ audio: bytes, turnId: "t1" })).toBe(false);
+  });
+
+  it("preserves chunk flags as positional args", async () => {
+    await Pipeline.pushAudio({
+      audio: bytes,
+      turnId: "t2",
+      isFirstChunk: true,
+      isLastChunk: true,
+    });
+    expect(mockNativeModule.pushPipelineAudioBinarySync).toHaveBeenCalledWith(
+      bytes,
+      "t2",
+      true,
+      true
+    );
+  });
+
+  it("passes the exact Uint8Array instance through (no copy at the JS layer)", () => {
+    const view = new Uint8Array(new ArrayBuffer(16), 4, 6); // subarray view
+    Pipeline.pushAudioSync({ audio: view, turnId: "t1" });
+    const passed = mockNativeModule.pushPipelineAudioBinarySync.mock.calls[0][0];
+    expect(passed).toBe(view);
+    expect(passed.byteOffset).toBe(4);
+    expect(passed.byteLength).toBe(6);
+  });
+
+  it("string audio still uses the legacy base64 functions", async () => {
+    await Pipeline.pushAudio({ audio: "QUJD", turnId: "t1" });
+    Pipeline.pushAudioSync({ audio: "QUJD", turnId: "t1" });
+    expect(mockNativeModule.pushPipelineAudioBinarySync).not.toHaveBeenCalled();
+    expect(mockNativeModule.pushPipelineAudio).toHaveBeenCalledTimes(1);
+    expect(mockNativeModule.pushPipelineAudioSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("pushAudio rejects when the sync binary push fails", async () => {
+    mockNativeModule.pushPipelineAudioBinarySync.mockReturnValueOnce(false);
+    await expect(
+      Pipeline.pushAudio({ audio: bytes, turnId: "t1" })
+    ).rejects.toThrow("PIPELINE_PUSH_ERROR");
   });
 });
 

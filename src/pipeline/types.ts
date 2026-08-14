@@ -65,8 +65,16 @@ export interface ConnectPipelineResult {
 
 /** Options passed to `pushPipelineAudio()` / `pushPipelineAudioSync()`. */
 export interface PushPipelineAudioOptions {
-  /** Base64-encoded PCM 16-bit signed LE audio data. */
-  audio: string;
+  /**
+   * PCM 16-bit signed LE audio data.
+   *
+   * - `string`: base64-encoded (legacy path, always supported).
+   * - `Uint8Array`: raw bytes, no base64 round-trip. Preferred for the hot
+   *   path — e.g. `new Uint8Array(msg.data)` from a binary WebSocket. The
+   *   bytes are copied on the native side during the call, so the buffer
+   *   may be reused immediately after `pushAudioSync` returns.
+   */
+  audio: string | Uint8Array;
   /** Conversation turn identifier. */
   turnId: string;
   /** True if this is the first chunk of a new turn (resets jitter buffer). */

@@ -54,24 +54,58 @@ export class Pipeline {
   // ════════════════════════════════════════════════════════════════════════
 
   /**
-   * Push base64-encoded PCM16 audio into the jitter buffer (async).
+   * Push PCM16 LE audio into the jitter buffer (async).
+   *
+   * `options.audio` may be a base64 string or a `Uint8Array` of raw bytes;
+   * the binary form skips the base64 round-trip entirely.
    *
    * Use this when you need error propagation via Promise rejection.
    * For the hot path (e.g., inside a WebSocket message handler), prefer
    * [pushAudioSync] which avoids Promise overhead.
    */
   static async pushAudio(options: PushPipelineAudioOptions): Promise<void> {
+    if (options.audio instanceof Uint8Array) {
+      // Binary audio always goes through the synchronous native function:
+      // typed-array memory is only safely readable on the JS thread, which
+      // is where sync calls execute. An async native variant would touch the
+      // JS runtime from the module queue.
+      const ok = ExpoPlayAudioStreamModule.pushPipelineAudioBinarySync(
+        options.audio,
+        options.turnId,
+        options.isFirstChunk ?? false,
+        options.isLastChunk ?? false
+      );
+      if (!ok) {
+        throw new Error(
+          "PIPELINE_PUSH_ERROR: binary push failed (is the pipeline connected? see PipelineError events)"
+        );
+      }
+      return;
+    }
     return await ExpoPlayAudioStreamModule.pushPipelineAudio(options);
   }
 
   /**
-   * Push base64-encoded PCM16 audio synchronously (no Promise overhead).
+   * Push PCM16 LE audio synchronously (no Promise overhead).
+   *
+   * `options.audio` may be a base64 string or a `Uint8Array` of raw bytes.
+   * The binary form is the cheapest crossing: a synchronous JSI call with
+   * no base64 decode and no string allocation. Native copies the bytes
+   * during the call, so the buffer may be reused as soon as this returns.
    *
    * Designed for the hot path — call this from your WebSocket onmessage
    * handler for minimum latency. Returns `true` on success, `false` on
    * failure (errors are also reported via PipelineError events).
    */
   static pushAudioSync(options: PushPipelineAudioOptions): boolean {
+    if (options.audio instanceof Uint8Array) {
+      return ExpoPlayAudioStreamModule.pushPipelineAudioBinarySync(
+        options.audio,
+        options.turnId,
+        options.isFirstChunk ?? false,
+        options.isLastChunk ?? false
+      );
+    }
     return ExpoPlayAudioStreamModule.pushPipelineAudioSync(options);
   }
 

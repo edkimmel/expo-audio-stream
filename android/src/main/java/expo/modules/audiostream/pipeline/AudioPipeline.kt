@@ -405,6 +405,22 @@ class AudioPipeline(
      * @param isLastChunk  True if this is the final chunk of the current turn.
      */
     fun pushAudio(base64Audio: String, turnId: String, isFirstChunk: Boolean, isLastChunk: Boolean) {
+        val bytes: ByteArray = try {
+            Base64.decode(base64Audio, Base64.DEFAULT)
+        } catch (e: Exception) {
+            listener.onError("DECODE_ERROR", "Base64 decode failed: ${e.message}")
+            return
+        }
+        pushAudio(bytes, turnId, isFirstChunk, isLastChunk)
+    }
+
+    /**
+     * Push raw PCM16 LE bytes into the jitter buffer. Binary twin of the
+     * base64 overload — the bytes must be fully consumed before returning
+     * (callers may hand us memory backed by a JS ArrayBuffer that is only
+     * pinned for the duration of the bridge call).
+     */
+    fun pushAudio(bytes: ByteArray, turnId: String, isFirstChunk: Boolean, isLastChunk: Boolean) {
         val buf = jitterBuffer ?: run {
             listener.onError("NOT_CONNECTED", "Pipeline not connected")
             return
@@ -426,14 +442,7 @@ class AudioPipeline(
                 cancelPendingPlaybackStopped()
             }
 
-            // ── Decode base64 → PCM shorts ──────────────────────────────
-            val bytes: ByteArray = try {
-                Base64.decode(base64Audio, Base64.DEFAULT)
-            } catch (e: Exception) {
-                listener.onError("DECODE_ERROR", "Base64 decode failed: ${e.message}")
-                return
-            }
-
+            // ── Bytes → PCM shorts ──────────────────────────────────────
             val shortBuffer = ByteBuffer.wrap(bytes)
                 .order(ByteOrder.LITTLE_ENDIAN)
                 .asShortBuffer()

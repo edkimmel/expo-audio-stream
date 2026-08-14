@@ -18,6 +18,7 @@ import expo.modules.interfaces.permissions.Permissions
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import expo.modules.kotlin.typedarray.Uint8Array
 import expo.modules.audiostream.pipeline.PipelineIntegration
 
 
@@ -188,6 +189,14 @@ class ExpoPlayAudioStreamModule : Module(), EventSender {
 
         Function("pushPipelineAudioSync") { options: Map<String, Any?> ->
             val result: Boolean = pipelineIntegration.pushAudioSync(options)
+            return@Function result
+        }
+
+        // Binary push is sync-only by design: typed-array access is only
+        // guaranteed safe on the JS thread, where synchronous Functions run.
+        // The TS layer wraps this for the async Pipeline.pushAudio API.
+        Function("pushPipelineAudioBinarySync") { audio: Uint8Array, turnId: String, isFirstChunk: Boolean, isLastChunk: Boolean ->
+            val result: Boolean = pipelineIntegration.pushAudioBinarySync(audio, turnId, isFirstChunk, isLastChunk)
             return@Function result
         }
 
