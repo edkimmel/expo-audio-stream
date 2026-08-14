@@ -9,54 +9,22 @@ appId: com.edkimmel.audiostream.dev
 
 - assertVisible: "expo-audio-stream test suites"
 
-# ── Pipeline PCM (base64) ──────────────────────────────────────────────
-- tapOn:
-    id: "suite-link-pipeline-base64"
-- tapOn:
-    id: "run-suite"
-- extendedWaitUntil:
-    visible:
-      id: "suite-status"
-      text: "PASS"
-    timeout: 120000
-- tapOn:
-    id: "back-home"
+- runFlow:
+    file: run-suite.yaml
+    env:
+      SUITE_LINK: suite-link-pipeline-base64
 
-# ── Pipeline PCM (binary) ──────────────────────────────────────────────
-- tapOn:
-    id: "suite-link-pipeline-binary"
-- tapOn:
-    id: "run-suite"
-- extendedWaitUntil:
-    visible:
-      id: "suite-status"
-      text: "PASS"
-    timeout: 120000
-- tapOn:
-    id: "back-home"
+- runFlow:
+    file: run-suite.yaml
+    env:
+      SUITE_LINK: suite-link-pipeline-binary
 
-# ── Pipeline edge cases ────────────────────────────────────────────────
-- tapOn:
-    id: "suite-link-pipeline-edge"
-- tapOn:
-    id: "run-suite"
-- extendedWaitUntil:
-    visible:
-      id: "suite-status"
-      text: "PASS"
-    timeout: 120000
-- tapOn:
-    id: "back-home"
+- runFlow:
+    file: run-suite.yaml
+    env:
+      SUITE_LINK: suite-link-pipeline-edge
 
-# ── Microphone capture ─────────────────────────────────────────────────
-- tapOn:
-    id: "suite-link-mic-capture"
-- tapOn:
-    id: "run-suite"
-- extendedWaitUntil:
-    visible:
-      id: "suite-status"
-      text: "PASS"
-    timeout: 120000
-- tapOn:
-    id: "back-home"
+- runFlow:
+    file: run-suite.yaml
+    env:
+      SUITE_LINK: suite-link-mic-capture

@@ -153,19 +153,10 @@ jobs:
           pulseaudio --start --exit-idle-time=-1
           pactl info
 
-      # Note: default emulator options minus -no-audio, so AudioTrack and
-      # AudioRecord behave like a real device.
+      # The script creates the AVD (API 34, host ABI), boots it headless
+      # (CI=true), installs the APK, and runs Maestro.
       - name: Run Maestro suites on emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          arch: x86_64
-          disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
-          # android-emulator-runner feeds `script` to `sh -c` line-by-line, so
-          # a multi-line `|| { ... }` never parses. The shared script is one
-          # command and is also what we run locally (`yarn e2e:android`).
-          script: bash scripts/run-maestro-android.sh
+        run: bash scripts/run-maestro-android.sh
 
       # Maestro writes into a hidden .maestro/ subdirectory, so hidden files
       # must be included or the artifact uploads empty.
