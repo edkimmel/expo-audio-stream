@@ -280,6 +280,23 @@ public class ExpoPlayAudioStreamModule: Module, MicrophoneDataDelegate, Pipeline
             return self.pipelineIntegration.pushAudioSync(options: options)
         }
 
+        AsyncFunction("pushPipelineAudioBinary") { (audio: Uint8Array, turnId: String, isFirstChunk: Bool, isLastChunk: Bool, promise: Promise) in
+            do {
+                // Copy out of the JS-owned ArrayBuffer before the call returns.
+                let bytes = Data(bytes: audio.rawPointer, count: audio.byteLength)
+                try self.pipelineIntegration.pushAudioBinary(bytes: bytes, turnId: turnId, isFirstChunk: isFirstChunk, isLastChunk: isLastChunk)
+                promise.resolve(nil)
+            } catch {
+                promise.reject("PIPELINE_PUSH_ERROR", error.localizedDescription)
+            }
+        }
+
+        Function("pushPipelineAudioBinarySync") { (audio: Uint8Array, turnId: String, isFirstChunk: Bool, isLastChunk: Bool) -> Bool in
+            // Copy out of the JS-owned ArrayBuffer before the call returns.
+            let bytes = Data(bytes: audio.rawPointer, count: audio.byteLength)
+            return self.pipelineIntegration.pushAudioBinarySync(bytes: bytes, turnId: turnId, isFirstChunk: isFirstChunk, isLastChunk: isLastChunk)
+        }
+
         AsyncFunction("disconnectPipeline") { (promise: Promise) in
             self.pipelineIntegration.removeAsDelegate(from: self.sharedAudioEngine)
             self.pipelineIntegration.disconnect()

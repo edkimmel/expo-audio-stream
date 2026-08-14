@@ -432,6 +432,18 @@ class AudioPipeline: SharedAudioEngineDelegate {
     // ════════════════════════════════════════════════════════════════════
 
     func pushAudio(base64Audio: String, turnId: String, isFirstChunk: Bool, isLastChunk: Bool) {
+        guard let bytes = Data(base64Encoded: base64Audio) else {
+            listener?.onError(code: "DECODE_ERROR", message: "Base64 decode failed")
+            return
+        }
+        pushAudio(bytes: bytes, turnId: turnId, isFirstChunk: isFirstChunk, isLastChunk: isLastChunk)
+    }
+
+    /// Push raw PCM16 LE bytes into the jitter buffer. Binary twin of the
+    /// base64 overload — the bytes must be fully consumed before returning
+    /// (callers may hand us memory backed by a JS ArrayBuffer that is only
+    /// pinned for the duration of the bridge call).
+    func pushAudio(bytes: Data, turnId: String, isFirstChunk: Bool, isLastChunk: Bool) {
         guard let buf = jitterBuffer else {
             listener?.onError(code: "NOT_CONNECTED", message: "Pipeline not connected")
             return
@@ -453,12 +465,7 @@ class AudioPipeline: SharedAudioEngineDelegate {
             }
         }
 
-        // ── Decode base64 → PCM shorts ──────────────────────────────────
-        guard let bytes = Data(base64Encoded: base64Audio) else {
-            listener?.onError(code: "DECODE_ERROR", message: "Base64 decode failed")
-            return
-        }
-
+        // ── Bytes → PCM shorts ──────────────────────────────────────────
         // PCM16 LE matches the in-memory sample layout on all Apple targets
         // (little-endian), so a bulk copy replaces per-sample conversion. Any
         // odd trailing byte is dropped, same as before.

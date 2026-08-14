@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import expo.modules.audiostream.EventSender
+import expo.modules.kotlin.typedarray.Uint8Array
 
 /**
  * Bridge layer wiring [AudioPipeline] into the existing ExpoPlayAudioStreamModule.
@@ -197,6 +198,53 @@ class PipelineIntegration(
             Log.e(TAG, "pushAudioSync failed", e)
             false
         }
+    }
+
+    /**
+     * Binary twin of [pushAudio]: raw PCM16 LE bytes, no base64. The typed
+     * array's memory is backed by the JS ArrayBuffer, so it is copied to a
+     * ByteArray here — inside the bridge call — before being handed to the
+     * pipeline.
+     */
+    fun pushAudioBinary(
+        audio: Uint8Array,
+        turnId: String,
+        isFirstChunk: Boolean,
+        isLastChunk: Boolean,
+        promise: expo.modules.kotlin.Promise
+    ) {
+        try {
+            val p = pipeline
+                ?: throw IllegalStateException("Pipeline not connected")
+            p.pushAudio(typedArrayToBytes(audio), turnId, isFirstChunk, isLastChunk)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "pushAudioBinary failed", e)
+            promise.reject("PIPELINE_PUSH_ERROR", e.message ?: "Unknown error", e)
+        }
+    }
+
+    /** Binary twin of [pushAudioSync]. Returns false on any failure. */
+    fun pushAudioBinarySync(
+        audio: Uint8Array,
+        turnId: String,
+        isFirstChunk: Boolean,
+        isLastChunk: Boolean
+    ): Boolean {
+        return try {
+            val p = pipeline ?: return false
+            p.pushAudio(typedArrayToBytes(audio), turnId, isFirstChunk, isLastChunk)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "pushAudioBinarySync failed", e)
+            false
+        }
+    }
+
+    private fun typedArrayToBytes(audio: Uint8Array): ByteArray {
+        val bytes = ByteArray(audio.byteLength)
+        audio.toDirectBuffer().get(bytes)
+        return bytes
     }
 
     /**
