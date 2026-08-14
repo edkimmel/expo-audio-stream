@@ -1,16 +1,17 @@
 name: CI
 
-# Runs on PR open/update against ANY base branch (stacked PRs included),
-# plus direct pushes to main and claude/** working branches.
+# PRs into main run once (pull_request). Direct pushes to main still run.
+# Feature-branch pushes are not a second trigger — that doubled every check
+# on PRs from claude/** (push + pull_request for the same SHA).
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main]
   pull_request:
+    types: [opened, ready_for_review, reopened, synchronize]
+    branches:
+      - main
   workflow_dispatch:
 
-# One run per commit: when a push and a pull_request event fire for the same
-# head SHA (branch with an open PR), the second run supersedes the first
-# instead of running the whole matrix twice.
 concurrency:
   group: ci-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
