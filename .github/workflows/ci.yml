@@ -164,7 +164,16 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
           script: |
             adb install -r example/android/app/build/outputs/apk/release/app-release.apk
-            maestro test .maestro/all-suites.yml --debug-output maestro-debug
+            # On failure, dump the live UI hierarchy (contains suite status and
+            # per-test failure details) and a logcat tail directly into the job
+            # log, so failures are diagnosable without downloading artifacts.
+            maestro test .maestro/all-suites.yml --debug-output maestro-debug || {
+              echo '==== UI hierarchy at failure ===='
+              maestro hierarchy || true
+              echo '==== logcat tail ===='
+              adb logcat -d | grep -iE 'expo|audiostream|pipeline|ReactNative|AndroidRuntime|maestro' | tail -n 200 || true
+              exit 1
+            }
 
       # Maestro writes into a hidden .maestro/ subdirectory, so hidden files
       # must be included or the artifact uploads empty.
