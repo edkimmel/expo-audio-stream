@@ -1,0 +1,30 @@
+# Runs every on-device test suite in the example app and asserts PASS.
+# Suite UI contract (testIDs) is defined in example/App.tsx and
+# example/screens/SuiteScreen.tsx.
+appId: com.edkimmel.audiostream.dev
+---
+- launchApp:
+    permissions:
+      all: allow
+
+- assertVisible: "expo-audio-stream test suites"
+
+- runFlow:
+    file: run-suite.yaml
+    env:
+      SUITE_LINK: suite-link-pipeline-base64
+
+- runFlow:
+    file: run-suite.yaml
+    env:
+      SUITE_LINK: suite-link-pipeline-binary
+
+- runFlow:
+    file: run-suite.yaml
+    env:
+      SUITE_LINK: suite-link-pipeline-edge
+
+- runFlow:
+    file: run-suite.yaml
+    env:
+      SUITE_LINK: suite-link-mic-capture

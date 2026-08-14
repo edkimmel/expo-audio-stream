@@ -1,0 +1,18 @@
+# Shared steps for one on-device suite. Wait for a terminal status so a
+# FAIL does not sit on the 120s PASS timeout; then assert PASS.
+appId: com.edkimmel.audiostream.dev
+---
+- tapOn:
+    id: ${SUITE_LINK}
+- tapOn:
+    id: "run-suite"
+- extendedWaitUntil:
+    visible:
+      id: "suite-status"
+      text: "PASS|FAIL"
+    timeout: 120000
+- assertVisible:
+    id: "suite-status"
+    text: "PASS"
+- tapOn:
+    id: "back-home"

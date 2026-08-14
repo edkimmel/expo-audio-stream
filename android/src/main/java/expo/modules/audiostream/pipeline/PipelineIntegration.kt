@@ -192,7 +192,8 @@ class PipelineIntegration(
             val isFirstChunk = options["isFirstChunk"] as? Boolean ?: false
             val isLastChunk = options["isLastChunk"] as? Boolean ?: false
 
-            pipeline?.pushAudio(audio, turnId, isFirstChunk, isLastChunk)
+            val p = pipeline ?: return false
+            p.pushAudio(audio, turnId, isFirstChunk, isLastChunk)
             true
         } catch (e: Exception) {
             Log.e(TAG, "pushAudioSync failed", e)
